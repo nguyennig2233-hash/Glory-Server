@@ -98,16 +98,43 @@ function presenceFor(viewerId, id) {
   const out = { status: p.status, version: p.version, server: p.server || null, mode: p.mode };
   if (p.lan) {
     const same = pres[viewerId] && pres[viewerId].ip === p.ip;
-    out.lan = { port: p.lan.port, ips: p.lan.ips || [], address: p.lan.address || '', sameNet: !!same, publicIp: same ? '' : p.ip };
+    out.lan = { port: p.lan.port, ips: p.lan.ips || [], address: p.lan.address || '', sameNet: !!same, publicIp: same ? '' : p.ip, relay: !!p.lan.relay };
   }
   return out;
 }
+// Tin nhắn: mỗi người giữ bản của mình trong u.chat[idBạn] = [{t, m:1 nếu mình gửi, x}] (t tăng dần trong mỗi cuộc trò chuyện, đồng thời là mã tin)
+const MSG_MAX = 500, MSG_PER_CHAT = 100, MSG_PER_USER = 1000;
+const chatOf = (u, id) => ((u.chat ||= {})[id] ||= []);
+const readAt = (u, id) => ((u.readAt || {})[id] || 0);
+const unreadOf = (u, id) => (u.chat && u.chat[id] ? u.chat[id].filter((x) => !x.m && x.t > readAt(u, id)).length : 0);
+const lastOf = (u, id) => { const c = u.chat && u.chat[id], x = c && c[c.length - 1]; return x ? { t: x.t, m: x.m ? 1 : 0, x: x.x.slice(0, 80) } : null; };
+function trimChats(u) {
+  let total = Object.values(u.chat || {}).reduce((n, c) => n + c.length, 0);
+  while (total > MSG_PER_USER) {                                    // quá nhiều: bỏ tin cũ nhất ở cuộc trò chuyện dài nhất
+    const [k, c] = Object.entries(u.chat).sort((a, b) => b[1].length - a[1].length)[0];
+    c.shift(); total--; if (!c.length) delete u.chat[k];
+  }
+}
+// Gọi thoại: máy chủ chỉ chuyển "tín hiệu" (lời mời, SDP, ICE) giữa 2 bạn bè; tiếng nói đi thẳng giữa 2 máy (WebRTC). Chỉ nằm trong bộ nhớ, không lưu.
+const SIG_TYPES = ['invite', 'accept', 'decline', 'busy', 'offer', 'answer', 'ice', 'end'];
+const sig = new Map();        // userId -> { seq, q: [{ s, from, callId, type, data, at }], wait: { done, timer } | null }
+const sigOf = (id) => { let x = sig.get(id); if (!x) sig.set(id, (x = { seq: 0, q: [], wait: null })); return x; };
+const sigTimes = new Map();
+setInterval(() => { const now = Date.now(); for (const [id, x] of sig) { x.q = x.q.filter((m) => now - m.at < 60_000); if (!x.q.length && !x.wait && now - (x.last || 0) > 300_000) sig.delete(id); } }, 30_000).unref();
+const ICE_STUN = ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'];
+const iceServers = () => {
+  const out = [{ urls: ICE_STUN }];
+  const turn = (process.env.TURN_URLS || '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (turn.length) out.push({ urls: turn, username: process.env.TURN_USER || '', credential: process.env.TURN_PASS || '' });   // TURN (tùy chọn) giúp gọi được cả khi mạng chặn kết nối trực tiếp
+  return out;
+};
+const sendTimes = new Map();   // userId -> [thời điểm gửi]
 function snapshot(me) {
   if (!me.fid) { me.fid = newFid(); touch(); }
   const r = rel(me.id), U = (id) => db.users[id];
   return {
     me: { ...brief(me), fid: me.fid, plan: vipOn(me) ? { until: me.plan.until || null } : null },
-    friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id) })),
+    friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id), unread: unreadOf(me, u.id), last: lastOf(me, u.id) })),
     incoming: r.in.map(U).filter(Boolean).map(brief),
     outgoing: r.out.map(U).filter(Boolean).map(brief),
   };
@@ -188,7 +215,7 @@ function route(req, body, ip) {
     if ('stats' in body) { me.stats = cleanStats(body.stats); touch(); }
     const q = body.presence;
     if (q && typeof q === 'object') {
-      const lan = q.lan && Number.isInteger(q.lan.port) ? { port: q.lan.port, ips: (q.lan.ips || []).filter((x) => typeof x === 'string').slice(0, 6), address: String(q.lan.address || '').slice(0, 80) } : null;
+      const lan = q.lan && Number.isInteger(q.lan.port) ? { port: q.lan.port, ips: (q.lan.ips || []).filter((x) => typeof x === 'string').slice(0, 6), address: String(q.lan.address || '').slice(0, 80), relay: q.lan.relay === true } : null;
       const srv = q.server && typeof q.server.address === 'string' ? { address: q.server.address.slice(0, 80), kind: q.server.kind === 'lan' ? 'lan' : 'public' } : null;
       pres[me.id] = { at: Date.now(), ip, mode: ['online', 'idle', 'dnd', 'invisible'].includes(q.mode) ? q.mode : 'online', status: ['online', 'playing'].includes(q.status) ? q.status : 'online', version: String(q.version || '').slice(0, 16), server: srv, lan };
     } else delete pres[me.id];
@@ -228,8 +255,56 @@ function route(req, body, ip) {
     const t = db.users[body.id]; if (!t) return [404, { error: 'not_found' }];
     const a = rel(me.id), b = rel(t.id);
     if (p.endsWith('accept')) { if (a.in.includes(t.id)) { drop(a.in, t.id); drop(b.out, me.id); a.friends.push(t.id); b.friends.push(me.id); } }
-    else { for (const k of ['in', 'out', 'friends']) { drop(a[k], t.id); drop(b[k], me.id); } } // decline = từ chối / hủy lời mời; remove = hủy kết bạn
+    else { for (const k of ['in', 'out', 'friends']) { drop(a[k], t.id); drop(b[k], me.id); } if (p.endsWith('remove')) { if (me.chat) delete me.chat[t.id]; if (t.chat) delete t.chat[me.id]; } } // decline = từ chối / hủy lời mời; remove = hủy kết bạn
     touch(); return [200, snapshot(me)];
+  }
+  if (p === '/api/call/ice' && m === 'GET') return [200, { iceServers: iceServers() }];
+  if (p === '/api/call/signal' && m === 'POST') {
+    const t = db.users[body.to];
+    if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
+    if (!SIG_TYPES.includes(body.type) || typeof body.callId !== 'string' || !/^[A-Za-z0-9_-]{6,40}$/.test(body.callId)) return [400, { error: 'bad_signal' }];
+    const data = body.data == null ? null : body.data;
+    if (data != null && JSON.stringify(data).length > 40_000) return [413, { error: 'too_large' }];
+    const now = Date.now(), recent = (sigTimes.get(me.id) || []).filter((x) => now - x < 10_000);
+    if (recent.length >= 80) return [429, { error: 'slow_down' }];
+    recent.push(now); sigTimes.set(me.id, recent);
+    const box = sigOf(t.id); box.last = now;
+    box.q.push({ s: ++box.seq, from: me.id, callId: body.callId, type: body.type, data, at: now });
+    if (box.q.length > 200) box.q.splice(0, box.q.length - 200);
+    if (box.wait) { const w = box.wait; box.wait = null; clearTimeout(w.timer); w.done(); }
+    return [200, { ok: true }];
+  }
+  if (p === '/api/call/poll' && m === 'GET') {       // long-poll: giữ yêu cầu tới 25 giây cho tới khi có tín hiệu. after = mã tín hiệu cuối đã nhận (xác nhận để xoá)
+    const after = +url.searchParams.get('after') || 0, box = sigOf(me.id); box.last = Date.now();
+    const take = () => { box.q = box.q.filter((x) => x.s > after && Date.now() - x.at < 60_000); return { signals: box.q.map((x) => ({ s: x.s, from: x.from, callId: x.callId, type: x.type, data: x.data })), seq: box.seq }; };
+    if (box.q.some((x) => x.s > after)) return [200, take()];
+    return new Promise((resolve) => {
+      if (box.wait) { clearTimeout(box.wait.timer); box.wait.done(); }       // chỉ giữ một yêu cầu chờ cho mỗi người
+      const done = () => resolve([200, take()]);
+      box.wait = { done, timer: setTimeout(() => { if (box.wait && box.wait.done === done) box.wait = null; done(); }, 25_000) };
+    });
+  }
+  if (p === '/api/msg/send' && m === 'POST') {
+    const t = db.users[body.to], text = typeof body.text === 'string' ? body.text.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim() : '';
+    if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
+    if (!text || [...text].length > MSG_MAX) return [400, { error: 'bad_msg' }];
+    const now = Date.now(), recent = (sendTimes.get(me.id) || []).filter((x) => now - x < 10_000);
+    if (recent.length >= 12) return [429, { error: 'slow_down' }];
+    recent.push(now); sendTimes.set(me.id, recent);
+    const a = chatOf(me, t.id), b = chatOf(t, me.id);
+    const at = Math.max(now, (a.length ? a[a.length - 1].t : 0) + 1, (b.length ? b[b.length - 1].t : 0) + 1);
+    a.push({ t: at, m: 1, x: text }); b.push({ t: at, x: text });
+    for (const [u, c] of [[me, a], [t, b]]) { if (c.length > MSG_PER_CHAT) c.splice(0, c.length - MSG_PER_CHAT); trimChats(u); }
+    (me.readAt ||= {})[t.id] = at;                                   // gửi tin = đã đọc mọi thứ trước đó
+    touch(); return [201, { msg: { t: at, m: 1, x: text } }];
+  }
+  if (p === '/api/msg/list' && m === 'GET') {
+    const id = url.searchParams.get('with') || '', after = +url.searchParams.get('after') || 0;
+    if (!rel(me.id).friends.includes(id)) return [403, { error: 'not_friends' }];
+    const c = (me.chat && me.chat[id]) || [];
+    const out = c.filter((x) => x.t > after).map((x) => ({ t: x.t, m: x.m ? 1 : 0, x: x.x }));
+    if (url.searchParams.get('read') === '1' && c.length) { const last = c[c.length - 1].t; if (readAt(me, id) < last) { (me.readAt ||= {})[id] = last; touch(); } }
+    return [200, { msgs: out }];
   }
   if (p === '/api/profile' && m === 'PUT') { me.profile = cleanProfile(body, vipOn(me)); touch(); return [200, snapshot(me)]; }
   if (p.startsWith('/api/profile/') && m === 'GET') {
@@ -253,6 +328,66 @@ const server = http.createServer((req, res) => {
     ready.then(() => route(req, body, ip)).then(([code, obj]) => send(code, obj)).catch(() => send(500, { error: 'server_error' }));
   });
 });
+
+// Chuyển tiếp LAN qua máy chủ (không cần VPN, không cần mở cổng router): chủ thế giới LAN giữ một kết nối điều khiển WebSocket tới đây;
+// khi một người bạn bấm "Vào chơi", máy chủ báo cho chủ mở thêm một kết nối "accept" rồi nối thẳng hai kết nối đó với nhau (chỉ chuyển byte, không đọc nội dung).
+let WebSocketServer = null; try { ({ WebSocketServer } = require('ws')); } catch {}
+const hostCtl = new Map(), waiting = new Map(), pipeCount = new Map();   // userId -> ws điều khiển | mã kết nối -> chờ ghép | userId chủ -> số đường đang chạy
+const MAX_PIPES = 8, BUF_MAX = 262144;
+function relayConn(ws, url, me) {
+  const kind = url.pathname;
+  if (kind === '/relay/host') {
+    const old = hostCtl.get(me.id); if (old && old !== ws) try { old.close(4000, 'replaced'); } catch {}
+    hostCtl.set(me.id, ws); ws.alive = true; ws.on('pong', () => { ws.alive = true; });
+    ws.on('close', () => { if (hostCtl.get(me.id) === ws) hostCtl.delete(me.id); });
+    ws.on('error', () => {}); ws.on('message', () => {});
+    return;
+  }
+  if (kind === '/relay/join') {
+    const host = db.users[url.searchParams.get('to')], ctl = host && hostCtl.get(host.id);
+    if (!host || !rel(me.id).friends.includes(host.id)) return ws.close(4403, 'not_friends');
+    if (!ctl || ctl.readyState !== 1) return ws.close(4404, 'no_host');
+    if ((pipeCount.get(host.id) || 0) >= MAX_PIPES) return ws.close(4429, 'busy');
+    const id = crypto.randomBytes(8).toString('hex'), w = { joiner: ws, host: host.id, buf: [], size: 0, peer: null };
+    waiting.set(id, w); pipeCount.set(host.id, (pipeCount.get(host.id) || 0) + 1);
+    const timer = setTimeout(() => { if (!w.peer) ws.close(4408, 'timeout'); }, 10_000);
+    ws.on('message', (d) => {
+      if (w.peer) { if (w.peer.readyState === 1) w.peer.send(d, { binary: true }); return; }
+      w.size += d.length; if (w.size > BUF_MAX) return ws.close(4413, 'too_large'); w.buf.push(d);
+    });
+    ws.on('close', () => { clearTimeout(timer); waiting.delete(id); pipeCount.set(host.id, Math.max(0, (pipeCount.get(host.id) || 1) - 1)); if (w.peer) try { w.peer.close(); } catch {} });
+    ws.on('error', () => {});
+    try { ctl.send(JSON.stringify({ t: 'open', id, from: me.id })); } catch { ws.close(4404, 'no_host'); }
+    return;
+  }
+  if (kind === '/relay/accept') {
+    const id = url.searchParams.get('id') || '', w = waiting.get(id);
+    if (!w || w.host !== me.id || w.peer) return ws.close(4404, 'no_pending');
+    waiting.delete(id); w.peer = ws;
+    ws.on('message', (d) => { if (w.joiner.readyState === 1) w.joiner.send(d, { binary: true }); });
+    ws.on('close', () => { try { w.joiner.close(); } catch {} });
+    ws.on('error', () => {});
+    for (const d of w.buf.splice(0)) ws.send(d, { binary: true });
+    return;
+  }
+  ws.close(4400, 'bad_path');
+}
+if (WebSocketServer) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20, perMessageDeflate: false });
+  setInterval(() => { for (const ws of hostCtl.values()) { if (ws.alive === false) { try { ws.terminate(); } catch {} continue; } ws.alive = false; try { ws.ping(); } catch {} } }, 25_000).unref();
+  server.on('upgrade', (req, socket, head) => {
+    const ip = (process.env.TRUST_PROXY && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
+    const n = (hits.get(ip) || 0) + 1; hits.set(ip, n);
+    const deny = (c) => { try { socket.write(`HTTP/1.1 ${c}\r\nConnection: close\r\n\r\n`); } catch {} socket.destroy(); };
+    let url; try { url = new URL(req.url, 'http://x'); } catch { return deny('400 Bad Request'); }
+    if (!url.pathname.startsWith('/relay/') || n > 300) return deny(n > 300 ? '429 Too Many Requests' : '404 Not Found');
+    const tok = (req.headers.authorization || '').replace(/^Bearer /, '');
+    ready.then(() => {
+      const me = tok && byToken(tok); if (!me) return deny('401 Unauthorized');
+      wss.handleUpgrade(req, socket, head, (ws) => relayConn(ws, url, me));
+    }).catch(() => deny('500 Server Error'));
+  });
+}
 if (require.main === module) ready.then(() => server.listen(PORT, () => console.log(`Glory Social server: http://localhost:${PORT} (${remote ? 'Upstash' : 'file'})`)), () => process.exit(1));
 module.exports = server;
 module.exports.ready = ready;
