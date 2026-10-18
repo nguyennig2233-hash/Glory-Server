@@ -169,6 +169,22 @@ function cleanProfile(p, vip) {
 const hits = new Map();
 setInterval(() => hits.clear(), 60_000).unref();
 
+// Đăng nhập Google: client gửi id_token (OpenID, chỉ xin scope openid nên không có email); máy chủ nhờ Google xác minh chữ ký rồi chỉ lấy mã `sub`
+const GOOGLE_CLIENT_ID = (process.env.GOOGLE_CLIENT_ID || '').trim();
+const GOOGLE_TOKENINFO = process.env.GOOGLE_TOKENINFO_URL || 'https://oauth2.googleapis.com/tokeninfo';
+async function verifyGoogle(idToken) {
+  const r = await fetch(GOOGLE_TOKENINFO + '?id_token=' + encodeURIComponent(idToken), { signal: AbortSignal.timeout(8000) });
+  if (r.status === 400) return null;                                   // token sai / hết hạn
+  if (!r.ok) throw new Error('google_down');
+  const j = await r.json();
+  const okIss = j.iss === 'https://accounts.google.com' || j.iss === 'accounts.google.com';
+  if (!okIss || j.aud !== GOOGLE_CLIENT_ID || !j.sub || !/^\d{5,40}$/.test(String(j.sub)) || (+j.exp * 1000 < Date.now())) return null;
+  return { sub: String(j.sub) };
+}
+const verified = (u) => !!(u && (u.mcUuid || u.gSub));                // chỉ tài khoản Microsoft hoặc Google mới dùng được bạn bè / chat / gọi
+const RENAME_MS = 7 * 86_400_000;
+const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p === '/api/call/signal' || p === '/api/call/poll' || p === '/api/search';
+
 function route(req, body, ip) {
   const url = new URL(req.url, 'http://x'), p = url.pathname, m = req.method;
   if (p === '/api/health') return [200, { ok: true, premiumOnly: PREMIUM_ONLY }];
@@ -179,13 +195,30 @@ function route(req, body, ip) {
     let u = Object.values(db.users).find((x) => x.mcUuid === prof.uuid);
     const clash = byName(prof.name);
     if (clash && clash !== u) {                                  // tên đang bị tài khoản offline giữ: Premium thật được giữ tên, bên kia đổi tên
-      if (clash.mcUuid) return [409, { error: 'name_taken' }];
+      if (verified(clash)) return [409, { error: 'name_taken' }];
       clash.name = (clash.name.slice(0, 12) + '_' + crypto.randomBytes(2).toString('hex')).slice(0, 16);
     }
     const token = crypto.randomBytes(24).toString('hex');
     if (!u) { u = { id: crypto.randomUUID(), profile: {}, created: Date.now() }; db.users[u.id] = u; }
     u.mcUuid = prof.uuid; u.name = prof.name; u.tokenHash = sha(token); touch();
     return [201, { id: u.id, token, premium: true }];
+  })();
+  if (p === '/api/register-google' && m === 'POST') return (async () => {
+    if (!GOOGLE_CLIENT_ID) return [503, { error: 'google_off' }];
+    if (typeof body.idToken !== 'string' || body.idToken.length < 50 || body.idToken.length > 4000) return [400, { error: 'bad_google' }];
+    let g = null; try { g = await verifyGoogle(body.idToken); } catch { return [502, { error: 'google_down' }]; }
+    if (!g) return [401, { error: 'bad_google' }];
+    let u = Object.values(db.users).find((x) => x.gSub === g.sub);
+    if (!u) {
+      if (body.name == null) return [200, { needName: true }];          // lần đầu: client phải hỏi người dùng đặt tên
+      if (!NAME_RE.test(body.name || '')) return [400, { error: 'bad_name' }];
+      const clash = byName(body.name);
+      if (clash && verified(clash)) return [409, { error: 'name_taken' }];
+      if (clash) clash.name = (clash.name.slice(0, 12) + '_' + crypto.randomBytes(2).toString('hex')).slice(0, 16);   // tên đang do tài khoản offline cũ giữ: nhường lại
+      u = { id: crypto.randomUUID(), name: body.name, fid: newFid(), gSub: g.sub, profile: {}, created: Date.now() }; db.users[u.id] = u;
+    }
+    const token = crypto.randomBytes(24).toString('hex'); u.tokenHash = sha(token); touch();
+    return [201, { id: u.id, token, name: u.name, fid: u.fid, google: true }];
   })();
   if (p === '/api/register' && m === 'POST') {
     if (PREMIUM_ONLY) return [403, { error: 'premium_only' }];
@@ -209,6 +242,16 @@ function route(req, body, ip) {
   }
   const me = tok && byToken(tok);
   if (!me) return [401, { error: 'unauthorized' }];
+  if (GATED(p) && !verified(me)) return [403, { error: 'need_login' }];
+  if (p === '/api/google/rename' && m === 'POST') {
+    if (!me.gSub) return [403, { error: 'need_login' }];
+    if (!NAME_RE.test(body.name || '')) return [400, { error: 'bad_name' }];
+    if (me.renamed && Date.now() - me.renamed < RENAME_MS) return [429, { error: 'rename_wait' }];
+    const clash = byName(body.name);
+    if (clash && clash !== me) { if (verified(clash)) return [409, { error: 'name_taken' }]; clash.name = (clash.name.slice(0, 12) + '_' + crypto.randomBytes(2).toString('hex')).slice(0, 16); }
+    me.name = body.name; me.renamed = Date.now(); touch();
+    return [200, snapshot(me)];
+  }
 
   if (p === '/api/sync' && m === 'POST') {
     if (!me.fid && FID.test(String(body.fid)) && !byFid(body.fid)) { me.fid = String(body.fid); touch(); }   // tài khoản đăng ký từ trước: nhận ID của client nếu còn trống
@@ -237,13 +280,13 @@ function route(req, body, ip) {
     const q = (url.searchParams.get('q') || '').toLowerCase().slice(0, 16);
     if (q.length < 2) return [200, { users: [] }];
     const r = rel(me.id);
-    const users = Object.values(db.users).filter((u) => u.id !== me.id && u.mcUuid && u.name.toLowerCase().includes(q)).slice(0, 20)
+    const users = Object.values(db.users).filter((u) => u.id !== me.id && verified(u) && u.name.toLowerCase().includes(q)).slice(0, 20)
       .map((u) => ({ ...brief(u), rel: r.friends.includes(u.id) ? 'friend' : r.in.includes(u.id) ? 'in' : r.out.includes(u.id) ? 'out' : 'none' }));
     return [200, { users }];
   }
   if (p === '/api/friends/request' && m === 'POST') {
     // Tài khoản offline chỉ tìm được bằng ID 12 số (tên offline ai cũng đặt được); tên chỉ dùng cho tài khoản Premium đã xác minh
-    const t = body.fid != null ? byFid(body.fid) : body.id ? db.users[body.id] : (() => { const u = byName(body.name); return u && u.mcUuid ? u : undefined; })();
+    const t = body.fid != null ? byFid(body.fid) : body.id ? db.users[body.id] : (() => { const u = byName(body.name); return u && verified(u) ? u : undefined; })();
     if (!t || t.id === me.id) return [404, { error: 'not_found' }];
     const a = rel(me.id), b = rel(t.id);
     if (a.friends.includes(t.id)) return [200, snapshot(me)];
