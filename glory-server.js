@@ -265,7 +265,7 @@ function route(req, body, ip) {
     return [200, snapshot(me)];
   }
   if (p === '/api/premium/redeem' && m === 'POST') {
-    if (!me.mcUuid) return [403, { error: 'need_ms' }];       // Premium gắn với tài khoản Microsoft đã xác minh, không gắn với tên offline
+    if (!verified(me)) return [403, { error: 'need_login' }];     // Premium gắn với tài khoản đã xác minh (Microsoft hoặc Google), không gắn với tên offline chưa xác minh
     const now = Date.now(), recent = (tries.get(me.id) || []).filter((t) => now - t < 600_000);
     if (recent.length >= 5) return [429, { error: 'too_many' }];
     const key = String(body.key || '').trim(), rec = KEY_RE.test(key) ? db.keys[sha(key)] : null;
