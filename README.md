@@ -1,1 +1,2 @@
-Glory PvP Client# Glory-Server
+# Glory-Server
+Glory PvP Client
