@@ -16,7 +16,7 @@ const NAME_RE = /^[A-Za-z0-9_]{3,16}$/;
 
 let db = { users: {}, rel: {}, keys: {} };
 try { db = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch {}
-db.keys ||= {};
+db.keys ||= {}; db.titles ||= [];
 let dirty = false;
 const touch = () => { dirty = true; };
 
@@ -34,18 +34,18 @@ async function upPipe(cmds) {
 async function loadRemote() {
   const [meta, ids] = await upPipe([['GET', 'glory:meta'], ['SMEMBERS', 'glory:ids']]);
   const m = meta ? JSON.parse(meta) : {};
-  db = { users: {}, rel: m.rel || {}, keys: m.keys || {} }; savedRemote.set('glory:meta', meta || '');
+  db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [] }; savedRemote.set('glory:meta', meta || '');
   for (let i = 0; i < (ids || []).length; i += 100) {
     const part = ids.slice(i, i + 100), vals = (await upPipe([['MGET', ...part.map((x) => 'glory:u:' + x)]]))[0];
     part.forEach((id, k) => { if (vals[k]) { try { db.users[id] = JSON.parse(vals[k]); savedRemote.set('glory:u:' + id, vals[k]); } catch {} } });
   }
-  db.keys ||= {};
+  db.keys ||= {}; db.titles ||= [];
 }
 async function flushRemote() {
   const batches = [[]]; let cur = 0;
   const add = (c) => { const n = JSON.stringify(c).length; if (cur + n > 700_000 && batches[batches.length - 1].length) { batches.push([]); cur = 0; } batches[batches.length - 1].push(c); cur += n; };
   const sets = new Map(), dels = [];                                  // ghi lại đúng bản đã gửi, thay đổi xảy ra giữa chừng sẽ được gửi ở lượt sau
-  const meta = JSON.stringify({ rel: db.rel, keys: db.keys });
+  const meta = JSON.stringify({ rel: db.rel, keys: db.keys, titles: db.titles });
   if (savedRemote.get('glory:meta') !== meta) { add(['SET', 'glory:meta', meta]); sets.set('glory:meta', meta); }
   const live = new Set();
   for (const [id, u] of Object.entries(db.users)) {
@@ -89,7 +89,12 @@ let verifyMc = async (token) => {
 const num = (v, max) => (Number.isFinite(+v) && +v > 0 ? Math.min(Math.floor(+v), max) : 0);
 const cleanStats = (q) => (q && typeof q === 'object' ? { blocksMined: num(q.blocksMined, 1e10), distanceBlocks: num(q.distanceBlocks, 1e9), kills: num(q.kills, 1e9), playerKills: num(q.playerKills, 1e9), deaths: num(q.deaths, 1e9), playMinutes: num(q.playMinutes, 1e8) } : null);
 const vipOn = (u) => !!(u.plan && (!u.plan.until || u.plan.until > Date.now()));
-const brief = (u) => ({ id: u.id, name: u.name, profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null });
+const OWNER_NAME = (process.env.OWNER_NAME || 'Devan_De_Glory').toLowerCase();   // chủ dự án: chỉ tài khoản ĐÃ XÁC MINH mang tên này mới có huy hiệu Owner
+const isOwner = (u) => !!(u && u.gSub && String(u.name || '').toLowerCase() === OWNER_NAME);
+// Title do chủ dự án (Dev Tab) đặt và tặng: db.titles xếp theo quyền lực (đầu mảng = cao nhất); người dùng chỉ hiện title cao nhất đang có
+const topTitle = (u) => { const own = Array.isArray(u.titles) ? u.titles : []; const t = db.titles.find((x) => own.includes(x.id)); return t ? { id: t.id, name: t.name, color: t.color, img: t.img || '' } : null; };
+const TITLE_IMG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,16000}$/;
+const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null });
 const newKey = () => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; let b = ''; for (let i = 0; i < 10; i++) b += A[crypto.randomInt(A.length)]; return `GLR_${b}@${String(crypto.randomInt(1000)).padStart(3, '0')}`; };
 const tries = new Map();   // userId -> [thời điểm thử sai]
 function presenceFor(viewerId, id) {
@@ -158,7 +163,7 @@ function snapshot(me) {
   if (!me.fid) { me.fid = newFid(); touch(); }
   const r = rel(me.id), U = (id) => db.users[id];
   return {
-    me: { ...brief(me), fid: me.fid, plan: vipOn(me) ? { until: me.plan.until || null } : null },
+    me: { ...brief(me), dev: isOwner(me), fid: me.fid, plan: vipOn(me) ? { until: me.plan.until || null } : null },
     friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id), unread: unreadOf(me, u.id), last: lastOf(me, u.id) })),
     incoming: r.in.map(U).filter(Boolean).map(brief),
     outgoing: r.out.map(U).filter(Boolean).map(brief),
@@ -268,6 +273,44 @@ function route(req, body, ip) {
   const me = tok && byToken(tok);
   if (!me) return [401, { error: 'unauthorized' }];
   if (GATED(p) && !verified(me)) return [403, { error: 'need_login' }];
+  if (p.startsWith('/api/dev/') && m === 'POST') {            // Dev Tab: chỉ tài khoản Google của chủ dự án
+    if (!isOwner(me)) return [403, { error: 'not_owner' }];
+    const op = p.slice(9), T = db.titles;
+    const dump = () => ({ titles: T.map((t) => ({ ...t, holders: Object.values(db.users).filter((u) => (u.titles || []).includes(t.id)).map((u) => u.name).slice(0, 100) })) });
+    if (op === 'state') return [200, dump()];
+    if (op === 'save') {
+      const name = String(body.name || '').trim().slice(0, 20), color = String(body.color || '#e03131');
+      if (!name) return [400, { error: 'bad_title' }];
+      if (!/^#[0-9a-fA-F]{6}$/.test(color)) return [400, { error: 'bad_color' }];
+      let img = body.img == null ? undefined : String(body.img);
+      if (img && !TITLE_IMG_RE.test(img)) return [400, { error: 'bad_img' }];
+      let t = body.id && T.find((x) => x.id === body.id);
+      if (!t) { if (T.length >= 20) return [400, { error: 'too_many' }]; t = { id: crypto.randomUUID().slice(0, 8), img: '' }; T.push(t); }
+      t.name = name; t.color = color; if (img !== undefined) t.img = img;
+      touch(); return [200, dump()];
+    }
+    if (op === 'delete') {
+      const i = T.findIndex((x) => x.id === body.id); if (i < 0) return [404, { error: 'not_found' }];
+      const id = T[i].id; T.splice(i, 1);
+      for (const u of Object.values(db.users)) if (u.titles && u.titles.includes(id)) u.titles = u.titles.filter((x) => x !== id);
+      touch(); return [200, dump()];
+    }
+    if (op === 'order') {
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
+      if (ids.length !== T.length || new Set(ids).size !== T.length || !ids.every((i) => T.some((x) => x.id === i))) return [400, { error: 'bad_order' }];
+      T.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+      touch(); return [200, dump()];
+    }
+    if (op === 'grant') {
+      const t = T.find((x) => x.id === body.title), u = byName(body.name);
+      if (!t) return [404, { error: 'not_found' }];
+      if (!u || !verified(u)) return [404, { error: 'user_not_found' }];
+      u.titles = (u.titles || []).filter((x) => x !== t.id);
+      if (body.on !== false) u.titles.push(t.id);
+      touch(); return [200, dump()];
+    }
+    return [404, { error: 'not_found' }];
+  }
   if (p === '/api/google/rename' && m === 'POST') {
     if (!me.gSub) return [403, { error: 'need_login' }];
     if (!NAME_RE.test(body.name || '')) return [400, { error: 'bad_name' }];
