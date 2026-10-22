@@ -120,6 +120,31 @@ const SIG_TYPES = ['invite', 'accept', 'decline', 'busy', 'offer', 'answer', 'ic
 const sig = new Map();        // userId -> { seq, q: [{ s, from, callId, type, data, at }], wait: { done, timer } | null }
 const sigOf = (id) => { let x = sig.get(id); if (!x) sig.set(id, (x = { seq: 0, q: [], wait: null })); return x; };
 const sigTimes = new Map();
+// Phòng voice nhóm (tối đa ROOM_MAX người, mạng lưới WebRTC giữa các máy). Máy chủ chỉ giữ danh sách thành viên và chuyển tín hiệu; không lưu xuống đĩa.
+const ROOM_MAX = 5, ROOM_SIG = ['roffer', 'ranswer', 'rice'], ROOM_STALE = 90_000, INVITE_TTL = 120_000;
+const rooms = new Map();      // roomId -> { id, host, members: [userId], invited: Map(userId -> at), at }
+const roomOf = (uid) => { for (const r of rooms.values()) if (r.members.includes(uid)) return r; return null; };
+const roomTimes = new Map();
+function pushSig(toId, fromId, callId, type, data = null) {
+  const box = sigOf(toId), now = Date.now();
+  box.q.push({ s: ++box.seq, from: fromId, callId, type, data, at: now });
+  if (box.q.length > 200) box.q.splice(0, box.q.length - 200);
+  if (box.wait) { const w = box.wait; box.wait = null; clearTimeout(w.timer); w.done(); }
+}
+function roomLeave(r, uid) {
+  r.members = r.members.filter((x) => x !== uid);
+  for (const x of r.members) pushSig(x, uid, r.id, 'rleave');
+  if (!r.members.length) rooms.delete(r.id); else if (r.host === uid) r.host = r.members[0];
+}
+const roomView = (r) => ({ room: r.id, host: r.host, max: ROOM_MAX, members: r.members.map((id) => db.users[id]).filter(Boolean).map((u) => ({ id: u.id, name: u.name, profile: u.profile || {} })) });
+// Dọn: người trong phòng mà máy không còn hỏi tín hiệu (tắt launcher / mất mạng) thì bị mời ra
+setInterval(() => {
+  const now = Date.now();
+  for (const r of [...rooms.values()]) {
+    for (const [u, at] of r.invited) if (now - at > INVITE_TTL) r.invited.delete(u);
+    for (const u of [...r.members]) { const b = sig.get(u); if (!b || now - (b.last || 0) > ROOM_STALE) roomLeave(r, u); }
+  }
+}, 20_000).unref();
 setInterval(() => { const now = Date.now(); for (const [id, x] of sig) { x.q = x.q.filter((m) => now - m.at < 60_000); if (!x.q.length && !x.wait && now - (x.last || 0) > 300_000) sig.delete(id); } }, 30_000).unref();
 const ICE_STUN = ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'];
 const iceServers = () => {
@@ -183,7 +208,7 @@ async function verifyGoogle(idToken) {
 }
 const verified = (u) => !!(u && (u.mcUuid || u.gSub));                // chỉ tài khoản Microsoft hoặc Google mới dùng được bạn bè / chat / gọi
 const RENAME_MS = 7 * 86_400_000;
-const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p === '/api/call/signal' || p === '/api/call/poll' || p === '/api/search';
+const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search';
 
 function route(req, body, ip) {
   const url = new URL(req.url, 'http://x'), p = url.pathname, m = req.method;
@@ -301,15 +326,64 @@ function route(req, body, ip) {
     else { for (const k of ['in', 'out', 'friends']) { drop(a[k], t.id); drop(b[k], me.id); } if (p.endsWith('remove')) { if (me.chat) delete me.chat[t.id]; if (t.chat) delete t.chat[me.id]; } } // decline = từ chối / hủy lời mời; remove = hủy kết bạn
     touch(); return [200, snapshot(me)];
   }
+  if (p.startsWith('/api/room/')) {
+    const now = Date.now();
+    if (p === '/api/room/create' && m === 'POST') {
+      const recent = (roomTimes.get(me.id) || []).filter((x) => now - x < 60_000);
+      if (recent.length >= 10) return [429, { error: 'slow_down' }];
+      recent.push(now); roomTimes.set(me.id, recent);
+      sigOf(me.id).last = now;
+      const cur = roomOf(me.id); if (cur) roomLeave(cur, me.id);
+      const r = { id: crypto.randomBytes(8).toString('hex'), host: me.id, members: [me.id], invited: new Map(), at: now }; rooms.set(r.id, r);
+      return [201, roomView(r)];
+    }
+    if (p === '/api/room/invite' && m === 'POST') {
+      const r = rooms.get(String(body.room)), t = db.users[body.to];
+      if (!r || !r.members.includes(me.id)) return [404, { error: 'no_room' }];
+      if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
+      if (r.members.includes(t.id)) return [200, roomView(r)];
+      if (r.members.length + r.invited.size >= ROOM_MAX) return [409, { error: 'room_full' }];
+      const recent = (roomTimes.get(me.id) || []).filter((x) => now - x < 60_000);
+      if (recent.length >= 30) return [429, { error: 'slow_down' }];
+      recent.push(now); roomTimes.set(me.id, recent);
+      r.invited.set(t.id, now); pushSig(t.id, me.id, r.id, 'rinvite', { n: r.members.length });
+      return [200, roomView(r)];
+    }
+    if (p === '/api/room/join' && m === 'POST') {
+      const r = rooms.get(String(body.room));
+      if (!r) return [404, { error: 'no_room' }];
+      if (!r.members.includes(me.id)) {
+        if (!r.invited.has(me.id)) return [403, { error: 'not_invited' }];
+        if (r.members.length >= ROOM_MAX) return [409, { error: 'room_full' }];
+        sigOf(me.id).last = now;
+        const cur = roomOf(me.id); if (cur) roomLeave(cur, me.id);
+        r.invited.delete(me.id); r.members.push(me.id);
+        for (const x of r.members) if (x !== me.id) pushSig(x, me.id, r.id, 'rjoin');
+      }
+      return [200, roomView(r)];
+    }
+    if (p === '/api/room/leave' && m === 'POST') {
+      const r = rooms.get(String(body.room)); if (r && r.members.includes(me.id)) roomLeave(r, me.id);
+      return [200, { ok: true }];
+    }
+    if (p === '/api/room/state' && m === 'GET') {
+      const r = rooms.get(String(url.searchParams.get('room')));
+      if (!r || !r.members.includes(me.id)) return [404, { error: 'no_room' }];
+      return [200, roomView(r)];
+    }
+    return [404, { error: 'not_found' }];
+  }
   if (p === '/api/call/ice' && m === 'GET') return [200, { iceServers: iceServers() }];
   if (p === '/api/call/signal' && m === 'POST') {
-    const t = db.users[body.to];
-    if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
-    if (!SIG_TYPES.includes(body.type) || typeof body.callId !== 'string' || !/^[A-Za-z0-9_-]{6,40}$/.test(body.callId)) return [400, { error: 'bad_signal' }];
+    const t = db.users[body.to], isRoom = ROOM_SIG.includes(body.type);
+    if (!t) return [403, { error: 'not_friends' }];
+    if (isRoom) { const r = rooms.get(String(body.callId)); if (!r || !r.members.includes(me.id) || !r.members.includes(t.id)) return [403, { error: 'not_in_room' }]; }
+    else if (!rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
+    if (!(isRoom || SIG_TYPES.includes(body.type)) || typeof body.callId !== 'string' || !/^[A-Za-z0-9_-]{6,40}$/.test(body.callId)) return [400, { error: 'bad_signal' }];
     const data = body.data == null ? null : body.data;
     if (data != null && JSON.stringify(data).length > 40_000) return [413, { error: 'too_large' }];
     const now = Date.now(), recent = (sigTimes.get(me.id) || []).filter((x) => now - x < 10_000);
-    if (recent.length >= 80) return [429, { error: 'slow_down' }];
+    if (recent.length >= (isRoom ? 300 : 80)) return [429, { error: 'slow_down' }];
     recent.push(now); sigTimes.set(me.id, recent);
     const box = sigOf(t.id); box.last = now;
     box.q.push({ s: ++box.seq, from: me.id, callId: body.callId, type: body.type, data, at: now });
