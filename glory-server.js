@@ -16,7 +16,7 @@ const NAME_RE = /^[A-Za-z0-9_]{3,16}$/;
 
 let db = { users: {}, rel: {}, keys: {} };
 try { db = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch {}
-db.keys ||= {}; db.titles ||= [];
+db.keys ||= {}; db.titles ||= []; db.news ||= null;
 let dirty = false;
 const touch = () => { dirty = true; };
 
@@ -34,18 +34,18 @@ async function upPipe(cmds) {
 async function loadRemote() {
   const [meta, ids] = await upPipe([['GET', 'glory:meta'], ['SMEMBERS', 'glory:ids']]);
   const m = meta ? JSON.parse(meta) : {};
-  db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [] }; savedRemote.set('glory:meta', meta || '');
+  db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [], news: m.news || null }; savedRemote.set('glory:meta', meta || '');
   for (let i = 0; i < (ids || []).length; i += 100) {
     const part = ids.slice(i, i + 100), vals = (await upPipe([['MGET', ...part.map((x) => 'glory:u:' + x)]]))[0];
     part.forEach((id, k) => { if (vals[k]) { try { db.users[id] = JSON.parse(vals[k]); savedRemote.set('glory:u:' + id, vals[k]); } catch {} } });
   }
-  db.keys ||= {}; db.titles ||= [];
+  db.keys ||= {}; db.titles ||= []; db.news ||= null;
 }
 async function flushRemote() {
   const batches = [[]]; let cur = 0;
   const add = (c) => { const n = JSON.stringify(c).length; if (cur + n > 700_000 && batches[batches.length - 1].length) { batches.push([]); cur = 0; } batches[batches.length - 1].push(c); cur += n; };
   const sets = new Map(), dels = [];                                  // ghi lại đúng bản đã gửi, thay đổi xảy ra giữa chừng sẽ được gửi ở lượt sau
-  const meta = JSON.stringify({ rel: db.rel, keys: db.keys, titles: db.titles });
+  const meta = JSON.stringify({ rel: db.rel, keys: db.keys, titles: db.titles, news: db.news });
   if (savedRemote.get('glory:meta') !== meta) { add(['SET', 'glory:meta', meta]); sets.set('glory:meta', meta); }
   const live = new Set();
   for (const [id, u] of Object.entries(db.users)) {
@@ -93,8 +93,12 @@ const OWNER_NAME = (process.env.OWNER_NAME || 'Devan_De_Glory').toLowerCase();  
 const isOwner = (u) => !!(u && u.gSub && String(u.name || '').toLowerCase() === OWNER_NAME);
 // Title do chủ dự án (Dev Tab) đặt và tặng: db.titles xếp theo quyền lực (đầu mảng = cao nhất); người dùng chỉ hiện title cao nhất đang có
 const topTitle = (u) => { const own = Array.isArray(u.titles) ? u.titles : []; const t = db.titles.find((x) => own.includes(x.id)); return t ? { id: t.id, name: t.name, color: t.color, img: t.img || '' } : null; };
+// Cấp quyền: 3 = Owner (Google, đúng tên chủ), 2 = Admin, 1 = Mod (do Owner phân trong Dev Tab); chỉ tài khoản đã xác minh mới có quyền
+const PERM_LVL = { mod: 1, admin: 2 };
+const titleLvl = (u) => (Array.isArray(u.titles) ? Math.max(0, ...db.titles.filter((t) => u.titles.includes(t.id)).map((t) => PERM_LVL[t.perm] || 0)) : 0);   // title có quyền (Mod / Admin) cũng mở Dev Tab
+const lvlOf = (u) => (isOwner(u) ? 3 : u && verified(u) ? Math.max(PERM_LVL[u.role] || 0, titleLvl(u)) : 0);
 const TITLE_IMG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,16000}$/;
-const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null });
+const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), staff: !isOwner(u) && lvlOf(u) ? (lvlOf(u) >= 2 ? 'admin' : 'mod') : null, title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null });
 const newKey = () => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; let b = ''; for (let i = 0; i < 10; i++) b += A[crypto.randomInt(A.length)]; return `GLR_${b}@${String(crypto.randomInt(1000)).padStart(3, '0')}`; };
 const tries = new Map();   // userId -> [thời điểm thử sai]
 function presenceFor(viewerId, id) {
@@ -163,10 +167,11 @@ function snapshot(me) {
   if (!me.fid) { me.fid = newFid(); touch(); }
   const r = rel(me.id), U = (id) => db.users[id];
   return {
-    me: { ...brief(me), dev: isOwner(me), fid: me.fid, plan: vipOn(me) ? { until: me.plan.until || null } : null },
+    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), fid: me.fid, plan: vipOn(me) ? { until: me.plan.until || null } : null },
     friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id), unread: unreadOf(me, u.id), last: lastOf(me, u.id) })),
     incoming: r.in.map(U).filter(Boolean).map(brief),
     outgoing: r.out.map(U).filter(Boolean).map(brief),
+    news: db.news || null,
   };
 }
 
@@ -272,10 +277,16 @@ function route(req, body, ip) {
   }
   const me = tok && byToken(tok);
   if (!me) return [401, { error: 'unauthorized' }];
+  if (me.banned && !isOwner(me)) return [403, { error: 'banned' }];
   if (GATED(p) && !verified(me)) return [403, { error: 'need_login' }];
   if (p.startsWith('/api/dev/') && m === 'POST') {            // Dev Tab: chỉ tài khoản Google của chủ dự án
-    if (!isOwner(me)) return [403, { error: 'not_owner' }];
-    const op = p.slice(9), T = db.titles;
+    const op = p.slice(9), T = db.titles, L = lvlOf(me);
+    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3 };
+    if (!(op in NEED)) return [404, { error: 'not_found' }];
+    if (L < NEED[op]) return [403, { error: 'not_owner' }];
+    const usersOf = (q) => Object.values(db.users).filter((u) => !q || u.name.toLowerCase().includes(q)).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 30)
+      .map((u) => ({ id: u.id, name: u.name, kind: u.gSub ? 'google' : u.mcUuid ? 'microsoft' : 'offline', premium: vipOn(u), until: vipOn(u) ? u.plan.until || null : undefined, created: u.created || 0, online: !!(pres[u.id] && Date.now() - pres[u.id].at < 90_000), banned: !!u.banned, muted: !!u.muted, role: ['', 'mod', 'admin', 'owner'][lvlOf(u)], titles: (u.titles || []).map((i) => (T.find((t) => t.id === i) || {}).name).filter(Boolean) }));
+    const target = () => { const t = body.id ? db.users[String(body.id)] : byName(body.name); return t && t.id !== me.id && lvlOf(t) < L ? t : null; };
     const dump = () => ({ titles: T.map((t) => ({ ...t, holders: Object.values(db.users).filter((u) => (u.titles || []).includes(t.id)).map((u) => u.name).slice(0, 100) })) });
     if (op === 'state') return [200, dump()];
     if (op === 'save') {
@@ -287,6 +298,7 @@ function route(req, body, ip) {
       let t = body.id && T.find((x) => x.id === body.id);
       if (!t) { if (T.length >= 20) return [400, { error: 'too_many' }]; t = { id: crypto.randomUUID().slice(0, 8), img: '' }; T.push(t); }
       t.name = name; t.color = color; if (img !== undefined) t.img = img;
+      if (body.perm !== undefined) { if (PERM_LVL[body.perm]) t.perm = body.perm; else delete t.perm; }
       touch(); return [200, dump()];
     }
     if (op === 'delete') {
@@ -304,10 +316,48 @@ function route(req, body, ip) {
     if (op === 'grant') {
       const t = T.find((x) => x.id === body.title), u = byName(body.name);
       if (!t) return [404, { error: 'not_found' }];
+      if (t.perm && L < 3) return [403, { error: 'not_owner' }];             // title có quyền chỉ Owner tặng / thu hồi
       if (!u || !verified(u)) return [404, { error: 'user_not_found' }];
       u.titles = (u.titles || []).filter((x) => x !== t.id);
       if (body.on !== false) u.titles.push(t.id);
       touch(); return [200, dump()];
+    }
+    if (op === 'stats') {
+      const all = Object.values(db.users), now = Date.now();
+      return [200, { users: all.length, verified: all.filter(verified).length, online: all.filter((u) => pres[u.id] && now - pres[u.id].at < 90_000).length, premium: all.filter(vipOn).length, rooms: rooms.size, titles: T.length, keysFree: Object.values(db.keys).filter((k) => !k.used).length, keysUsed: Object.values(db.keys).filter((k) => k.used).length, banned: all.filter((u) => u.banned).length }];
+    }
+    if (op === 'users') return [200, { users: usersOf(String(body.q || '').toLowerCase().slice(0, 24)) }];
+    if (op === 'ban' || op === 'mute') {
+      const t = target(); if (!t) return [404, { error: 'user_not_found' }];
+      const f = op === 'ban' ? 'banned' : 'muted'; if (body.on === false) delete t[f]; else t[f] = true;
+      if (f === 'banned' && t.banned) delete pres[t.id];
+      touch(); return [200, { users: usersOf(String(body.q || '').toLowerCase().slice(0, 24)) }];
+    }
+    if (op === 'announce') {
+      const text = String(body.text || '').replace(/\s+/g, ' ').trim().slice(0, 280);
+      if (!text) return [400, { error: 'bad_text' }];
+      db.news = { id: crypto.randomUUID().slice(0, 8), text, at: Date.now() }; touch(); return [200, { news: db.news }];
+    }
+    if (op === 'announce_clear') { db.news = null; touch(); return [200, { news: null }]; }
+    if (op === 'keys') {
+      const count = Math.max(1, Math.min(50, body.count | 0 || 1)), days = Math.max(0, Math.min(3650, body.days | 0)), keys = [];
+      while (keys.length < count) { const k = newKey(), h = sha(k); if (db.keys[h]) continue; db.keys[h] = { days, created: Date.now(), used: null, hint: k.slice(0, 8) + '…' }; keys.push(k); }
+      touch(); return [200, { keys, days }];
+    }
+    if (op === 'keylist') {
+      const list = Object.values(db.keys).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 60).map((k) => ({ hint: k.hint || '…', days: k.days, created: k.created, used: k.used ? { by: (db.users[k.used.by] || {}).name || '?', at: k.used.at } : null }));
+      return [200, { keys: list }];
+    }
+    if (op === 'premium') {
+      const t = byName(body.name); if (!t || !verified(t)) return [404, { error: 'user_not_found' }];
+      if (body.on === false) t.plan = null;
+      else { const days = Math.max(0, Math.min(3650, body.days | 0)), now = Date.now(), base = vipOn(t) && t.plan.until ? t.plan.until : now; t.plan = { until: days ? base + days * 86_400_000 : null, since: t.plan ? t.plan.since : now }; }
+      touch(); return [200, { users: usersOf(String(t.name).toLowerCase()) }];
+    }
+    if (op === 'role') {
+      const t = byName(body.name); if (!t || !verified(t) || isOwner(t)) return [404, { error: 'user_not_found' }];
+      const r = ['mod', 'admin'].includes(body.role) ? body.role : ''; if (r) t.role = r; else delete t.role;
+      touch(); return [200, { users: usersOf(String(t.name).toLowerCase()) }];
     }
     return [404, { error: 'not_found' }];
   }
@@ -445,6 +495,7 @@ function route(req, body, ip) {
     });
   }
   if (p === '/api/msg/send' && m === 'POST') {
+    if (me.muted) return [403, { error: 'muted' }];
     const t = db.users[body.to], text = typeof body.text === 'string' ? body.text.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim() : '';
     if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
     if (!text || [...text].length > MSG_MAX) return [400, { error: 'bad_msg' }];
