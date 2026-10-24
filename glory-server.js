@@ -16,7 +16,7 @@ const NAME_RE = /^[A-Za-z0-9_]{3,16}$/;
 
 let db = { users: {}, rel: {}, keys: {} };
 try { db = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch {}
-db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false };
+db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false }; db.capes ||= {};
 let dirty = false;
 const touch = () => { dirty = true; };
 
@@ -35,11 +35,17 @@ async function loadRemote() {
   const [meta, ids] = await upPipe([['GET', 'glory:meta'], ['SMEMBERS', 'glory:ids']]);
   const m = meta ? JSON.parse(meta) : {};
   db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [], news: m.news || null, audit: m.audit || [], maint: m.maint || { on: false } }; savedRemote.set('glory:meta', meta || '');
+  db.capes = {};
+  const cids = (await upPipe([['SMEMBERS', 'glory:cids']]))[0] || [];
+  for (let i = 0; i < cids.length; i += 100) {
+    const part = cids.slice(i, i + 100), vals = (await upPipe([['MGET', ...part.map((x) => 'glory:c:' + x)]]))[0];
+    part.forEach((id, k) => { if (vals[k]) { try { (db.capes ||= {})[id] = JSON.parse(vals[k]); savedRemote.set('glory:c:' + id, vals[k]); } catch {} } });
+  }
   for (let i = 0; i < (ids || []).length; i += 100) {
     const part = ids.slice(i, i + 100), vals = (await upPipe([['MGET', ...part.map((x) => 'glory:u:' + x)]]))[0];
     part.forEach((id, k) => { if (vals[k]) { try { db.users[id] = JSON.parse(vals[k]); savedRemote.set('glory:u:' + id, vals[k]); } catch {} } });
   }
-  db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false };
+  db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false }; db.capes ||= {};
 }
 async function flushRemote() {
   const batches = [[]]; let cur = 0;
@@ -52,6 +58,11 @@ async function flushRemote() {
     const k = 'glory:u:' + id, v = JSON.stringify(u); live.add(k);
     if (savedRemote.get(k) !== v) { add(['SET', k, v]); add(['SADD', 'glory:ids', id]); sets.set(k, v); }
   }
+  for (const [id, c] of Object.entries(db.capes || {})) {
+    const k = 'glory:c:' + id, v = JSON.stringify(c); live.add(k);
+    if (savedRemote.get(k) !== v) { add(['SET', k, v]); add(['SADD', 'glory:cids', id]); sets.set(k, v); }
+  }
+  for (const k of savedRemote.keys()) if (k.startsWith('glory:c:') && !live.has(k)) { add(['DEL', k]); add(['SREM', 'glory:cids', k.slice(8)]); dels.push(k); }
   for (const k of savedRemote.keys()) if (k.startsWith('glory:u:') && !live.has(k)) { add(['DEL', k]); add(['SREM', 'glory:ids', k.slice(8)]); dels.push(k); }
   for (const bt of batches) if (bt.length) await upPipe(bt);
   for (const [k, v] of sets) savedRemote.set(k, v);
@@ -211,6 +222,16 @@ function cleanProfile(p, vip) {
   return o;
 }
 
+const CAPE_NAME_RE = /^[A-Za-z0-9_\-. ]{2,24}$/, capeDl = new Map();
+setInterval(() => { const t = Date.now(); for (const [k, v] of capeDl) if (t - v > 3_600_000) capeDl.delete(k); }, 600_000).unref();
+function capePng(img) {                                            // PNG cape 64x32 hoặc 128x64, tối đa 60 KB
+  if (!/^data:image\/png;base64,[A-Za-z0-9+/=]{20,82000}$/.test(img)) return null;
+  const buf = Buffer.from(img.slice(22), 'base64'); if (buf.length > 60_000 || buf.length < 45) return null;
+  if (buf.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' || buf.toString('ascii', 12, 16) !== 'IHDR' || buf.toString('ascii', buf.length - 8, buf.length - 4) !== 'IEND') return null;
+  const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20); return (w === 64 && h === 32) || (w === 128 && h === 64) ? { w, h } : null;
+}
+const capeOut = (c, me) => ({ id: c.id, name: c.name, by: (db.users[c.by] || {}).name || '?', byId: c.by, mine: !!me && c.by === me.id, at: c.at, dl: c.dl || 0, w: c.w || 64, desc: c.desc || '', img: c.img });
+
 const hits = new Map();
 setInterval(() => hits.clear(), 60_000).unref();
 
@@ -356,12 +377,15 @@ function route(req, body, ip) {
       return [200, { maint: db.maint }];
     }
     if (op === 'capes') {
-      const off = Math.max(0, body.offset | 0), all = Object.values(db.users).filter((u) => u.cape || u.capeBan).sort((a, b) => ((b.cape || {}).at || 0) - ((a.cape || {}).at || 0));
-      return [200, { total: all.length, capes: all.slice(off, off + 12).map((u) => ({ id: u.id, name: u.name, img: u.cape ? u.cape.img : '', at: u.cape ? u.cape.at : 0, banned: !!u.capeBan })) }];
+      const off = Math.max(0, body.offset | 0), g = Object.values(db.capes).map((c) => ({ id: c.id, name: c.name + ' · ' + ((db.users[c.by] || {}).name || '?'), img: c.img, at: c.at, banned: !!(db.users[c.by] || {}).capeBan, gallery: true }));
+      const old = Object.values(db.users).filter((u) => u.cape || u.capeBan).map((u) => ({ id: u.id, name: u.name, img: u.cape ? u.cape.img : '', at: u.cape ? u.cape.at : 0, banned: !!u.capeBan }));
+      const all = [...g, ...old].sort((a, b) => b.at - a.at);
+      return [200, { total: all.length, capes: all.slice(off, off + 12) }];
     }
     if (op === 'capedel' || op === 'capeunban') {
-      const t = db.users[String(body.id)]; if (!t) return [404, { error: 'user_not_found' }];
-      if (op === 'capedel') { delete t.cape; if (body.ban) t.capeBan = true; audit(me, body.ban ? 'cape.remove+ban' : 'cape.remove', t.name); }
+      const gc = db.capes[String(body.id)], t = gc ? db.users[gc.by] : db.users[String(body.id)];
+      if (!gc && !t) return [404, { error: 'user_not_found' }];
+      if (op === 'capedel') { if (gc) delete db.capes[gc.id]; else delete t.cape; if (body.ban && t) t.capeBan = true; audit(me, body.ban ? 'cape.remove+ban' : 'cape.remove', (gc ? gc.name + ' · ' : '') + (t ? t.name : '?')); }
       else { delete t.capeBan; audit(me, 'cape.unban', t.name); }
       touch(); return [200, { ok: true }];
     }
@@ -455,6 +479,42 @@ function route(req, body, ip) {
     me.cape = { img, at: Date.now() }; touch(); return [200, { ok: true }];
   }
   if (p === '/api/cape/clear' && m === 'POST') { delete me.cape; touch(); return [200, { ok: true }]; }
+
+  // ---- Cape Gallery: cape cộng đồng (tài khoản Google / Microsoft được đăng; ai cũng tải về dùng được) ----
+  if (p === '/api/capes' && m === 'GET') {
+    const q = (url.searchParams.get('q') || '').toLowerCase().trim().slice(0, 24), sort = url.searchParams.get('sort') === 'pop' ? 'pop' : 'new', mine = url.searchParams.get('mine') === '1';
+    const off = Math.max(0, (url.searchParams.get('offset') | 0)), lim = 18;
+    let all = Object.values(db.capes);
+    if (mine) all = all.filter((c) => c.by === me.id);
+    if (q) all = all.filter((c) => c.name.toLowerCase().includes(q) || (c.desc || '').toLowerCase().includes(q) || ((db.users[c.by] || {}).name || '').toLowerCase().includes(q));
+    all.sort(sort === 'pop' ? (a, b) => (b.dl || 0) - (a.dl || 0) || b.at - a.at : (a, b) => b.at - a.at);
+    return [200, { total: all.length, capes: all.slice(off, off + lim).map((c) => capeOut(c, me)) }];
+  }
+  if (p === '/api/capes/upload' && m === 'POST') {
+    if (!verified(me)) return [403, { error: 'need_verified' }];
+    if (me.capeBan) return [403, { error: 'cape_banned' }];
+    const name = String(body.name || '').replace(/\s+/g, ' ').trim(), img = String(body.img || '');
+    const desc = String(body.desc || '').replace(/[\u0000-\u001f\u007f<>]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);   // mô tả cape: tối đa 120 ký tự, bỏ ký tự điều khiển và < >
+    if (!CAPE_NAME_RE.test(name)) return [400, { error: 'bad_cape_name' }];
+    const info = capePng(img); if (!info) return [400, { error: 'bad_img' }];
+    const mineList = Object.values(db.capes).filter((c) => c.by === me.id);
+    if (mineList.length >= 8) return [409, { error: 'cape_limit' }];
+    if (mineList.some((c) => c.name.toLowerCase() === name.toLowerCase())) return [409, { error: 'cape_name_taken' }];
+    if (Object.keys(db.capes).length >= 1500) return [507, { error: 'gallery_full' }];
+    const id = crypto.randomBytes(5).toString('hex'); db.capes[id] = { id, name, desc, by: me.id, at: Date.now(), dl: 0, w: info.w, img }; touch();
+    return [200, { cape: capeOut(db.capes[id], me) }];
+  }
+  if (p === '/api/capes/delete' && m === 'POST') {
+    const c = db.capes[String(body.id)]; if (!c) return [404, { error: 'cape_not_found' }];
+    if (c.by !== me.id && lvlOf(me) < 2) return [403, { error: 'forbidden' }];
+    delete db.capes[c.id]; if (c.by !== me.id) audit(me, 'cape.remove', `${c.name} (${(db.users[c.by] || {}).name || '?'})`); touch(); return [200, { ok: true }];
+  }
+  if (p === '/api/capes/get' && m === 'POST') {            // tải về: trả ảnh đầy đủ và tính lượt tải (mỗi người một lần mỗi giờ)
+    const c = db.capes[String(body.id)]; if (!c) return [404, { error: 'cape_not_found' }];
+    const k = me.id + ':' + c.id, t = capeDl.get(k) || 0;
+    if (Date.now() - t > 3_600_000) { capeDl.set(k, Date.now()); c.dl = (c.dl || 0) + 1; touch(); }
+    return [200, { cape: { ...capeOut(c, me), img: c.img } }];
+  }
   if (p === '/api/search' && m === 'GET') {
     const q = (url.searchParams.get('q') || '').toLowerCase().slice(0, 16);
     if (q.length < 2) return [200, { users: [] }];
