@@ -203,6 +203,11 @@ function cleanProfile(p, vip) {
   o.statusEmoji = P_EMOJIS.includes(p.statusEmoji) ? p.statusEmoji : '';
   o.tags = (Array.isArray(p.tags) ? p.tags : []).filter((t, i, a) => P_TAGS.includes(t) && a.indexOf(t) === i).slice(0, 5);
   o.links = (Array.isArray(p.links) ? p.links : []).filter((l) => l && P_LINKS.includes(l.t) && typeof l.v === 'string' && HANDLE_RE.test(l.v)).slice(0, 4).map((l) => ({ t: l.t, v: l.v }));
+  const KIT_IDS = ['crystal', 'sword', 'axe', 'mace', 'pot', 'nethpot', 'smp', 'uhc', 'beast', 'elytra'], TIER_IDS = ['HT1', 'LT1', 'HT2', 'LT2', 'HT3', 'LT3', 'HT4', 'LT4', 'HT5', 'LT5'], RANK_IDS = ['rookie', 'fighter', 'veteran', 'elite', 'master', 'legend'];
+  const pv = p.pvp && typeof p.pvp === 'object' ? p.pvp : {}, pk = pv.kits && typeof pv.kits === 'object' ? pv.kits : {};
+  o.pvp = { rank: RANK_IDS.includes(pv.rank) ? pv.rank : '', main: '', kits: {} };
+  for (const id of KIT_IDS) if (TIER_IDS.includes(pk[id])) o.pvp.kits[id] = pk[id];
+  if (KIT_IDS.includes(pv.main) && o.pvp.kits[pv.main]) o.pvp.main = pv.main;
   return o;
 }
 
