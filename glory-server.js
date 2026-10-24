@@ -16,7 +16,7 @@ const NAME_RE = /^[A-Za-z0-9_]{3,16}$/;
 
 let db = { users: {}, rel: {}, keys: {} };
 try { db = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch {}
-db.keys ||= {}; db.titles ||= []; db.news ||= null;
+db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false };
 let dirty = false;
 const touch = () => { dirty = true; };
 
@@ -34,18 +34,18 @@ async function upPipe(cmds) {
 async function loadRemote() {
   const [meta, ids] = await upPipe([['GET', 'glory:meta'], ['SMEMBERS', 'glory:ids']]);
   const m = meta ? JSON.parse(meta) : {};
-  db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [], news: m.news || null }; savedRemote.set('glory:meta', meta || '');
+  db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [], news: m.news || null, audit: m.audit || [], maint: m.maint || { on: false } }; savedRemote.set('glory:meta', meta || '');
   for (let i = 0; i < (ids || []).length; i += 100) {
     const part = ids.slice(i, i + 100), vals = (await upPipe([['MGET', ...part.map((x) => 'glory:u:' + x)]]))[0];
     part.forEach((id, k) => { if (vals[k]) { try { db.users[id] = JSON.parse(vals[k]); savedRemote.set('glory:u:' + id, vals[k]); } catch {} } });
   }
-  db.keys ||= {}; db.titles ||= []; db.news ||= null;
+  db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false };
 }
 async function flushRemote() {
   const batches = [[]]; let cur = 0;
   const add = (c) => { const n = JSON.stringify(c).length; if (cur + n > 700_000 && batches[batches.length - 1].length) { batches.push([]); cur = 0; } batches[batches.length - 1].push(c); cur += n; };
   const sets = new Map(), dels = [];                                  // ghi lại đúng bản đã gửi, thay đổi xảy ra giữa chừng sẽ được gửi ở lượt sau
-  const meta = JSON.stringify({ rel: db.rel, keys: db.keys, titles: db.titles, news: db.news });
+  const meta = JSON.stringify({ rel: db.rel, keys: db.keys, titles: db.titles, news: db.news, audit: db.audit, maint: db.maint });
   if (savedRemote.get('glory:meta') !== meta) { add(['SET', 'glory:meta', meta]); sets.set('glory:meta', meta); }
   const live = new Set();
   for (const [id, u] of Object.entries(db.users)) {
@@ -97,6 +97,10 @@ const topTitle = (u) => { const own = Array.isArray(u.titles) ? u.titles : []; c
 const PERM_LVL = { mod: 1, admin: 2 };
 const titleLvl = (u) => (Array.isArray(u.titles) ? Math.max(0, ...db.titles.filter((t) => u.titles.includes(t.id)).map((t) => PERM_LVL[t.perm] || 0)) : 0);   // title có quyền (Mod / Admin) cũng mở Dev Tab
 const lvlOf = (u) => (isOwner(u) ? 3 : u && verified(u) ? Math.max(PERM_LVL[u.role] || 0, titleLvl(u)) : 0);
+const audit = (me, action, detail) => { db.audit.unshift({ at: Date.now(), by: me.name, lvl: lvlOf(me), action, detail: String(detail || '').slice(0, 160) }); if (db.audit.length > 300) db.audit.length = 300; touch(); };   // nhật ký thao tác của nhân viên
+const onlineIds = () => Object.keys(pres).filter((id) => Date.now() - pres[id].at < 90_000);
+const broadcast = (fromId, kind, data) => { const ids = onlineIds(); for (const id of ids) pushSig(id, fromId, '', 'bcast', { kind, ...(data || {}) }); return ids.length; };   // đẩy tới mọi client đang online ngay lập tức (long-poll đang mở)
+const CAPE_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,250000}$/;
 const TITLE_IMG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,16000}$/;
 const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), staff: !isOwner(u) && lvlOf(u) ? (lvlOf(u) >= 2 ? 'admin' : 'mod') : null, title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null });
 const newKey = () => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; let b = ''; for (let i = 0; i < 10; i++) b += A[crypto.randomInt(A.length)]; return `GLR_${b}@${String(crypto.randomInt(1000)).padStart(3, '0')}`; };
@@ -167,11 +171,12 @@ function snapshot(me) {
   if (!me.fid) { me.fid = newFid(); touch(); }
   const r = rel(me.id), U = (id) => db.users[id];
   return {
-    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), fid: me.fid, plan: vipOn(me) ? { until: me.plan.until || null } : null },
+    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), capeBan: !!me.capeBan, fid: me.fid, plan: vipOn(me) ? { until: me.plan.until || null } : null },
     friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id), unread: unreadOf(me, u.id), last: lastOf(me, u.id) })),
     incoming: r.in.map(U).filter(Boolean).map(brief),
     outgoing: r.out.map(U).filter(Boolean).map(brief),
     news: db.news || null,
+    maint: db.maint.on ? { on: true, msg: db.maint.msg || '' } : null,
   };
 }
 
@@ -222,7 +227,7 @@ const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') 
 
 function route(req, body, ip) {
   const url = new URL(req.url, 'http://x'), p = url.pathname, m = req.method;
-  if (p === '/api/health') return [200, { ok: true, premiumOnly: PREMIUM_ONLY }];
+  if (p === '/api/health') return [200, { ok: true, premiumOnly: PREMIUM_ONLY, maintenance: !!db.maint.on }];
   if (p === '/api/register-premium' && m === 'POST') return (async () => {
     if (typeof body.mcToken !== 'string' || body.mcToken.length < 20 || body.mcToken.length > 4000) return [400, { error: 'bad_token' }];
     let prof = null; try { prof = await verifyMc(body.mcToken); } catch { return [502, { error: 'mojang_down' }]; }
@@ -278,10 +283,11 @@ function route(req, body, ip) {
   const me = tok && byToken(tok);
   if (!me) return [401, { error: 'unauthorized' }];
   if (me.banned && !isOwner(me)) return [403, { error: 'banned' }];
+  if (db.maint.on && !lvlOf(me)) return [503, { error: 'maintenance', msg: db.maint.msg || '' }];       // bảo trì khẩn cấp: nhân viên vẫn vào được để xử lý
   if (GATED(p) && !verified(me)) return [403, { error: 'need_login' }];
   if (p.startsWith('/api/dev/') && m === 'POST') {            // Dev Tab: chỉ tài khoản Google của chủ dự án
     const op = p.slice(9), T = db.titles, L = lvlOf(me);
-    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3 };
+    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3, online: 1, health: 1, audit: 2, broadcast: 2, maint: 3, keydel: 3, capes: 2, capedel: 2, capeunban: 2 };
     if (!(op in NEED)) return [404, { error: 'not_found' }];
     if (L < NEED[op]) return [403, { error: 'not_owner' }];
     const usersOf = (q) => Object.values(db.users).filter((u) => !q || u.name.toLowerCase().includes(q)).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 30)
@@ -295,22 +301,23 @@ function route(req, body, ip) {
       if (!/^#[0-9a-fA-F]{6}$/.test(color)) return [400, { error: 'bad_color' }];
       let img = body.img == null ? undefined : String(body.img);
       if (img && !TITLE_IMG_RE.test(img)) return [400, { error: 'bad_img' }];
-      let t = body.id && T.find((x) => x.id === body.id);
+      let t = body.id && T.find((x) => x.id === body.id); const existed = !!t;
       if (!t) { if (T.length >= 20) return [400, { error: 'too_many' }]; t = { id: crypto.randomUUID().slice(0, 8), img: '' }; T.push(t); }
       t.name = name; t.color = color; if (img !== undefined) t.img = img;
       if (body.perm !== undefined) { if (PERM_LVL[body.perm]) t.perm = body.perm; else delete t.perm; }
+      audit(me, existed ? 'title.edit' : 'title.create', `${name}${t.perm ? ' [' + t.perm + ']' : ''}`);
       touch(); return [200, dump()];
     }
     if (op === 'delete') {
       const i = T.findIndex((x) => x.id === body.id); if (i < 0) return [404, { error: 'not_found' }];
-      const id = T[i].id; T.splice(i, 1);
+      const id = T[i].id; audit(me, 'title.delete', T[i].name); T.splice(i, 1);
       for (const u of Object.values(db.users)) if (u.titles && u.titles.includes(id)) u.titles = u.titles.filter((x) => x !== id);
       touch(); return [200, dump()];
     }
     if (op === 'order') {
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : [];
       if (ids.length !== T.length || new Set(ids).size !== T.length || !ids.every((i) => T.some((x) => x.id === i))) return [400, { error: 'bad_order' }];
-      T.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+      T.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id)); audit(me, 'title.order', T.map((x) => x.name).join(' > '));
       touch(); return [200, dump()];
     }
     if (op === 'grant') {
@@ -320,7 +327,38 @@ function route(req, body, ip) {
       if (!u || !verified(u)) return [404, { error: 'user_not_found' }];
       u.titles = (u.titles || []).filter((x) => x !== t.id);
       if (body.on !== false) u.titles.push(t.id);
+      audit(me, body.on === false ? 'title.revoke' : 'title.grant', `${t.name} → ${u.name}`);
       touch(); return [200, dump()];
+    }
+    if (op === 'online') {
+      const now = Date.now(), list = onlineIds().map((id) => ({ u: db.users[id], p: pres[id] })).filter((x) => x.u && x.p.mode !== 'invisible')
+        .map(({ u, p }) => ({ id: u.id, name: u.name, kind: u.gSub ? 'google' : u.mcUuid ? 'microsoft' : 'offline', status: p.status === 'playing' ? 'playing' : 'online', mode: p.mode, version: String(p.version || '').slice(0, 20), role: ['', 'mod', 'admin', 'owner'][lvlOf(u)], ago: Math.round((now - p.at) / 1000) }))
+        .sort((a, b) => (a.status === 'playing' ? -1 : 1) - (b.status === 'playing' ? -1 : 1) || a.name.localeCompare(b.name)).slice(0, 50);
+      return [200, { players: list, total: onlineIds().length }];
+    }
+    if (op === 'health') {
+      const mu = process.memoryUsage();
+      return [200, { uptime: Math.round(process.uptime()), rssMb: Math.round(mu.rss / 1048576), heapMb: Math.round(mu.heapUsed / 1048576), node: process.version, online: onlineIds().length, rooms: rooms.size, hosts: hostCtl.size, pollers: [...sig.values()].filter((x) => x.wait).length, store: remote ? 'upstash' : 'file', maint: !!db.maint.on, now: Date.now() }];
+    }
+    if (op === 'audit') return [200, { log: db.audit.slice(0, 120) }];
+    if (op === 'broadcast') {
+      const kind = body.kind === 'refresh' ? 'refresh' : 'news';
+      const sent = broadcast(me.id, kind); audit(me, 'broadcast.' + kind, `${sent} client(s)`); return [200, { sent }];
+    }
+    if (op === 'maint') {
+      const on = !!body.on, msg = String(body.msg || '').replace(/\s+/g, ' ').trim().slice(0, 160);
+      db.maint = { on, msg: on ? msg : '', by: me.name, at: Date.now() }; audit(me, on ? 'maint.on' : 'maint.off', msg); touch();
+      return [200, { maint: db.maint }];
+    }
+    if (op === 'capes') {
+      const off = Math.max(0, body.offset | 0), all = Object.values(db.users).filter((u) => u.cape || u.capeBan).sort((a, b) => ((b.cape || {}).at || 0) - ((a.cape || {}).at || 0));
+      return [200, { total: all.length, capes: all.slice(off, off + 12).map((u) => ({ id: u.id, name: u.name, img: u.cape ? u.cape.img : '', at: u.cape ? u.cape.at : 0, banned: !!u.capeBan })) }];
+    }
+    if (op === 'capedel' || op === 'capeunban') {
+      const t = db.users[String(body.id)]; if (!t) return [404, { error: 'user_not_found' }];
+      if (op === 'capedel') { delete t.cape; if (body.ban) t.capeBan = true; audit(me, body.ban ? 'cape.remove+ban' : 'cape.remove', t.name); }
+      else { delete t.capeBan; audit(me, 'cape.unban', t.name); }
+      touch(); return [200, { ok: true }];
     }
     if (op === 'stats') {
       const all = Object.values(db.users), now = Date.now();
@@ -331,32 +369,43 @@ function route(req, body, ip) {
       const t = target(); if (!t) return [404, { error: 'user_not_found' }];
       const f = op === 'ban' ? 'banned' : 'muted'; if (body.on === false) delete t[f]; else t[f] = true;
       if (f === 'banned' && t.banned) delete pres[t.id];
+      audit(me, (body.on === false ? 'un' : '') + op, t.name);
       touch(); return [200, { users: usersOf(String(body.q || '').toLowerCase().slice(0, 24)) }];
     }
     if (op === 'announce') {
       const text = String(body.text || '').replace(/\s+/g, ' ').trim().slice(0, 280);
       if (!text) return [400, { error: 'bad_text' }];
-      db.news = { id: crypto.randomUUID().slice(0, 8), text, at: Date.now() }; touch(); return [200, { news: db.news }];
+      db.news = { id: crypto.randomUUID().slice(0, 8), text, at: Date.now() }; audit(me, 'announce', text);
+      const sent = broadcast(me.id, 'news'); touch(); return [200, { news: db.news, sent }];
     }
-    if (op === 'announce_clear') { db.news = null; touch(); return [200, { news: null }]; }
+    if (op === 'announce_clear') { db.news = null; audit(me, 'announce.clear', ''); broadcast(me.id, 'news'); touch(); return [200, { news: null }]; }
     if (op === 'keys') {
-      const count = Math.max(1, Math.min(50, body.count | 0 || 1)), days = Math.max(0, Math.min(3650, body.days | 0)), keys = [];
-      while (keys.length < count) { const k = newKey(), h = sha(k); if (db.keys[h]) continue; db.keys[h] = { days, created: Date.now(), used: null, hint: k.slice(0, 8) + '…' }; keys.push(k); }
+      const count = Math.max(1, Math.min(100, body.count | 0 || 1)), days = Math.max(0, Math.min(3650, body.days | 0)), keys = [], note = String(body.note || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+      while (keys.length < count) { const k = newKey(), h = sha(k); if (db.keys[h]) continue; db.keys[h] = { id: crypto.randomBytes(4).toString('hex'), days, created: Date.now(), used: null, hint: k.slice(0, 8) + '…', note }; keys.push(k); }
+      audit(me, 'keys.create', `${count} × ${days ? days + 'd' : 'forever'}${note ? ' · ' + note : ''}`);
       touch(); return [200, { keys, days }];
     }
     if (op === 'keylist') {
-      const list = Object.values(db.keys).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 60).map((k) => ({ hint: k.hint || '…', days: k.days, created: k.created, used: k.used ? { by: (db.users[k.used.by] || {}).name || '?', at: k.used.at } : null }));
-      return [200, { keys: list }];
+      let changed = false; for (const k of Object.values(db.keys)) if (!k.id) { k.id = crypto.randomBytes(4).toString('hex'); changed = true; } if (changed) touch();
+      const all = Object.values(db.keys), list = all.sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 300).map((k) => ({ id: k.id, hint: k.hint || '…', days: k.days, created: k.created, note: k.note || '', used: k.used ? { by: (db.users[k.used.by] || {}).name || '?', at: k.used.at } : null }));
+      return [200, { keys: list, total: all.length, free: all.filter((k) => !k.used).length }];
+    }
+    if (op === 'keydel') {
+      const h = Object.keys(db.keys).find((x) => db.keys[x].id === body.id); if (!h) return [404, { error: 'not_found' }];
+      if (db.keys[h].used) return [409, { error: 'key_used' }];
+      audit(me, 'key.delete', db.keys[h].hint || ''); delete db.keys[h]; touch(); return [200, { ok: true }];
     }
     if (op === 'premium') {
       const t = byName(body.name); if (!t || !verified(t)) return [404, { error: 'user_not_found' }];
       if (body.on === false) t.plan = null;
       else { const days = Math.max(0, Math.min(3650, body.days | 0)), now = Date.now(), base = vipOn(t) && t.plan.until ? t.plan.until : now; t.plan = { until: days ? base + days * 86_400_000 : null, since: t.plan ? t.plan.since : now }; }
+      audit(me, body.on === false ? 'premium.revoke' : 'premium.give', `${t.name}${body.on === false ? '' : ' · ' + (body.days | 0 ? (body.days | 0) + 'd' : 'forever')}`);
       touch(); return [200, { users: usersOf(String(t.name).toLowerCase()) }];
     }
     if (op === 'role') {
       const t = byName(body.name); if (!t || !verified(t) || isOwner(t)) return [404, { error: 'user_not_found' }];
       const r = ['mod', 'admin'].includes(body.role) ? body.role : ''; if (r) t.role = r; else delete t.role;
+      audit(me, 'role.set', `${t.name} → ${r || 'none'}`);
       touch(); return [200, { users: usersOf(String(t.name).toLowerCase()) }];
     }
     return [404, { error: 'not_found' }];
@@ -394,6 +443,13 @@ function route(req, body, ip) {
     rec.used = { by: me.id, at: now }; touch();
     return [200, { ...snapshot(me), plan: me.plan }];
   }
+  if (p === '/api/cape/set' && m === 'POST') {            // cape tự chọn của Premium: lưu lên máy chủ để nhân viên duyệt
+    if (!vipOn(me)) return [403, { error: 'need_premium' }];
+    if (me.capeBan) return [403, { error: 'cape_banned' }];
+    const img = String(body.img || ''); if (!CAPE_RE.test(img) || Buffer.from(img.slice(22, 60), 'base64').subarray(0, 4).toString('hex') !== '89504e47') return [400, { error: 'bad_img' }];
+    me.cape = { img, at: Date.now() }; touch(); return [200, { ok: true }];
+  }
+  if (p === '/api/cape/clear' && m === 'POST') { delete me.cape; touch(); return [200, { ok: true }]; }
   if (p === '/api/search' && m === 'GET') {
     const q = (url.searchParams.get('q') || '').toLowerCase().slice(0, 16);
     if (q.length < 2) return [200, { users: [] }];
