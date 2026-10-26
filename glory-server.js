@@ -130,8 +130,14 @@ function presenceFor(viewerId, id) {
 const MSG_MAX = 500, MSG_PER_CHAT = 100, MSG_PER_USER = 1000;
 const chatOf = (u, id) => ((u.chat ||= {})[id] ||= []);
 const readAt = (u, id) => ((u.readAt || {})[id] || 0);
-const unreadOf = (u, id) => (u.chat && u.chat[id] ? u.chat[id].filter((x) => !x.m && x.t > readAt(u, id)).length : 0);
-const lastOf = (u, id) => { const c = u.chat && u.chat[id], x = c && c[c.length - 1]; return x ? { t: x.t, m: x.m ? 1 : 0, x: x.x.slice(0, 80) } : null; };
+const unreadOf = (u, id) => (u.chat && u.chat[id] ? u.chat[id].filter((x) => !x.m && !x.h && !x.d && x.t > readAt(u, id)).length : 0);
+const lastOf = (u, id) => { const c = u.chat && u.chat[id]; let x = null; if (c) for (let i = c.length - 1; i >= 0; i--) if (!c[i].h) { x = c[i]; break; } return x ? { t: x.t, m: x.m ? 1 : 0, x: x.d ? '' : x.x.slice(0, 80), d: x.d ? 1 : 0 } : null; };
+// Mỗi tin có mã phiên bản v (mặc định = t, tăng lên mỗi lần thu hồi / thả emoji / xóa) để máy khách chỉ cần hỏi "những gì mới hơn v"
+const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👎'];
+const verOf = (x) => x.v || x.t;
+const maxVer = (c) => c.reduce((n, x) => Math.max(n, verOf(x)), 0);
+const nextVer = (...chats) => Math.max(Date.now(), ...chats.map(maxVer)) + 1;
+const msgOut = (x) => { const o = { t: x.t, v: verOf(x), m: x.m ? 1 : 0, x: x.h || x.d ? '' : x.x }; if (x.d) o.d = 1; if (x.h) o.h = 1; if (x.rm) o.rm = x.rm; if (x.rt) o.rt = x.rt; return o; };
 function trimChats(u) {
   let total = Object.values(u.chat || {}).reduce((n, c) => n + c.length, 0);
   while (total > MSG_PER_USER) {                                    // quá nhiều: bỏ tin cũ nhất ở cuộc trò chuyện dài nhất
@@ -177,7 +183,8 @@ const iceServers = () => {
   if (turn.length) out.push({ urls: turn, username: process.env.TURN_USER || '', credential: process.env.TURN_PASS || '' });   // TURN (tùy chọn) giúp gọi được cả khi mạng chặn kết nối trực tiếp
   return out;
 };
-const sendTimes = new Map();   // userId -> [thời điểm gửi]
+const sendTimes = new Map();
+const actTimes = new Map();   // userId -> thời điểm các thao tác thu hồi / emoji / xóa tin   // userId -> [thời điểm gửi]
 function snapshot(me) {
   if (!me.fid) { me.fid = newFid(); touch(); }
   const r = rel(me.id), U = (id) => db.users[id];
@@ -230,7 +237,10 @@ function capePng(img) {                                            // PNG cape 6
   if (buf.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' || buf.toString('ascii', 12, 16) !== 'IHDR' || buf.toString('ascii', buf.length - 8, buf.length - 4) !== 'IEND') return null;
   const w = buf.readUInt32BE(16), h = buf.readUInt32BE(20); return (w === 64 && h === 32) || (w === 128 && h === 64) ? { w, h } : null;
 }
-const capeOut = (c, me) => ({ id: c.id, name: c.name, by: (db.users[c.by] || {}).name || '?', byId: c.by, mine: !!me && c.by === me.id, at: c.at, dl: c.dl || 0, w: c.w || 64, desc: c.desc || '', img: c.img });
+const capeOut = (c, me) => ({ id: c.id, name: c.name, by: (db.users[c.by] || {}).name || '?', byId: c.by, mine: !!me && c.by === me.id, at: c.at, dl: c.dl || 0, w: c.w || 64, desc: c.desc || '', img: c.img,
+  likes: (c.likes || []).length, favs: (c.favs || []).length, liked: !!me && (c.likes || []).includes(me.id), faved: !!me && (c.favs || []).includes(me.id), reported: !!me && !!(c.rep && c.rep[me.id]),
+  rep: me && lvlOf(me) >= 2 ? Object.keys(c.rep || {}).length : undefined });
+const CAPE_REPORT_WHY = ['inappropriate', 'stolen', 'offensive', 'other'];
 
 const hits = new Map();
 setInterval(() => hits.clear(), 60_000).unref();
@@ -253,7 +263,7 @@ const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') 
 
 function route(req, body, ip) {
   const url = new URL(req.url, 'http://x'), p = url.pathname, m = req.method;
-  if (p === '/api/health') return [200, { ok: true, premiumOnly: PREMIUM_ONLY, maintenance: !!db.maint.on }];
+  if (p === '/api/health') return [200, { ok: true, premiumOnly: PREMIUM_ONLY, maintenance: !!db.maint.on, relay: !!WebSocketServer, turn: !!(process.env.TURN_URLS || '').trim() }];
   if (p === '/api/register-premium' && m === 'POST') return (async () => {
     if (typeof body.mcToken !== 'string' || body.mcToken.length < 20 || body.mcToken.length > 4000) return [400, { error: 'bad_token' }];
     let prof = null; try { prof = await verifyMc(body.mcToken); } catch { return [502, { error: 'mojang_down' }]; }
@@ -377,7 +387,7 @@ function route(req, body, ip) {
       return [200, { maint: db.maint }];
     }
     if (op === 'capes') {
-      const off = Math.max(0, body.offset | 0), g = Object.values(db.capes).map((c) => ({ id: c.id, name: c.name + ' · ' + ((db.users[c.by] || {}).name || '?'), img: c.img, at: c.at, banned: !!(db.users[c.by] || {}).capeBan, gallery: true }));
+      const off = Math.max(0, body.offset | 0), g = Object.values(db.capes).map((c) => ({ id: c.id, name: c.name + ' · ' + ((db.users[c.by] || {}).name || '?'), img: c.img, at: c.at, banned: !!(db.users[c.by] || {}).capeBan, gallery: true, likes: (c.likes || []).length, favs: (c.favs || []).length, rep: Object.keys(c.rep || {}).length }));
       const old = Object.values(db.users).filter((u) => u.cape || u.capeBan).map((u) => ({ id: u.id, name: u.name, img: u.cape ? u.cape.img : '', at: u.cape ? u.cape.at : 0, banned: !!u.capeBan }));
       const all = [...g, ...old].sort((a, b) => b.at - a.at);
       return [200, { total: all.length, capes: all.slice(off, off + 12) }];
@@ -482,13 +492,38 @@ function route(req, body, ip) {
 
   // ---- Cape Gallery: cape cộng đồng (tài khoản Google / Microsoft được đăng; ai cũng tải về dùng được) ----
   if (p === '/api/capes' && m === 'GET') {
-    const q = (url.searchParams.get('q') || '').toLowerCase().trim().slice(0, 24), sort = url.searchParams.get('sort') === 'pop' ? 'pop' : 'new', mine = url.searchParams.get('mine') === '1';
+    const q = (url.searchParams.get('q') || '').toLowerCase().trim().slice(0, 24), mine = url.searchParams.get('mine') === '1', favOnly = url.searchParams.get('fav') === '1';
+    let sort = url.searchParams.get('sort') || 'new'; if (sort === 'pop') sort = 'dl';
+    if (!['new', 'likes', 'favs', 'dl', 'rep'].includes(sort) || (sort === 'rep' && lvlOf(me) < 2)) sort = 'new';
     const off = Math.max(0, (url.searchParams.get('offset') | 0)), lim = 18;
     let all = Object.values(db.capes);
     if (mine) all = all.filter((c) => c.by === me.id);
+    if (favOnly) all = all.filter((c) => (c.favs || []).includes(me.id));
     if (q) all = all.filter((c) => c.name.toLowerCase().includes(q) || (c.desc || '').toLowerCase().includes(q) || ((db.users[c.by] || {}).name || '').toLowerCase().includes(q));
-    all.sort(sort === 'pop' ? (a, b) => (b.dl || 0) - (a.dl || 0) || b.at - a.at : (a, b) => b.at - a.at);
+    const n = { likes: (c) => (c.likes || []).length, favs: (c) => (c.favs || []).length, dl: (c) => c.dl || 0, rep: (c) => Object.keys(c.rep || {}).length };
+    all.sort(sort === 'new' ? (x, y) => y.at - x.at : (x, y) => n[sort](y) - n[sort](x) || (y.likes || []).length - (x.likes || []).length || y.at - x.at);
+    if (sort === 'rep') all = all.filter((c) => n.rep(c) > 0);
     return [200, { total: all.length, capes: all.slice(off, off + lim).map((c) => capeOut(c, me)) }];
+  }
+  // like / favourite: bật-tắt, mỗi tài khoản đã xác minh một lần cho mỗi cape (số liệu ai cũng thấy)
+  if ((p === '/api/capes/like' || p === '/api/capes/fav') && m === 'POST') {
+    if (!verified(me)) return [403, { error: 'need_verified' }];
+    const c = db.capes[String(body.id)]; if (!c) return [404, { error: 'cape_not_found' }];
+    const key = p.endsWith('like') ? 'likes' : 'favs';
+    if (key === 'likes' && c.by === me.id) return [400, { error: 'own_cape' }];
+    const arr = (c[key] ||= []), i = arr.indexOf(me.id);
+    if (i >= 0) arr.splice(i, 1); else arr.push(me.id);
+    touch(); return [200, { cape: { id: c.id, likes: (c.likes || []).length, favs: (c.favs || []).length, liked: (c.likes || []).includes(me.id), faved: (c.favs || []).includes(me.id) } }];
+  }
+  // báo cáo: mỗi người một lần cho mỗi cape; nhân viên thấy số báo cáo và xử lý (xoá cape / cấm đăng cape)
+  if (p === '/api/capes/report' && m === 'POST') {
+    if (!verified(me)) return [403, { error: 'need_verified' }];
+    const c = db.capes[String(body.id)]; if (!c) return [404, { error: 'cape_not_found' }];
+    if (c.by === me.id) return [400, { error: 'own_cape' }];
+    const why = CAPE_REPORT_WHY.includes(body.why) ? body.why : 'other';
+    c.rep ||= {}; if (c.rep[me.id]) return [409, { error: 'already_reported' }];
+    if (Object.keys(c.rep).length >= 50) return [200, { ok: true }];
+    c.rep[me.id] = why; audit(me, 'cape.report', `${c.name} (${(db.users[c.by] || {}).name || '?'}) · ${why}`); touch(); return [200, { ok: true }];
   }
   if (p === '/api/capes/upload' && m === 'POST') {
     if (!verified(me)) return [403, { error: 'need_verified' }];
@@ -624,7 +659,7 @@ function route(req, body, ip) {
     if (recent.length >= 12) return [429, { error: 'slow_down' }];
     recent.push(now); sendTimes.set(me.id, recent);
     const a = chatOf(me, t.id), b = chatOf(t, me.id);
-    const at = Math.max(now, (a.length ? a[a.length - 1].t : 0) + 1, (b.length ? b[b.length - 1].t : 0) + 1);
+    const at = nextVer(a, b);
     a.push({ t: at, m: 1, x: text }); b.push({ t: at, x: text });
     for (const [u, c] of [[me, a], [t, b]]) { if (c.length > MSG_PER_CHAT) c.splice(0, c.length - MSG_PER_CHAT); trimChats(u); }
     (me.readAt ||= {})[t.id] = at;                                   // gửi tin = đã đọc mọi thứ trước đó
@@ -634,9 +669,44 @@ function route(req, body, ip) {
     const id = url.searchParams.get('with') || '', after = +url.searchParams.get('after') || 0;
     if (!rel(me.id).friends.includes(id)) return [403, { error: 'not_friends' }];
     const c = (me.chat && me.chat[id]) || [];
-    const out = c.filter((x) => x.t > after).map((x) => ({ t: x.t, m: x.m ? 1 : 0, x: x.x }));
+    const out = c.filter((x) => verOf(x) > after).map(msgOut);
     if (url.searchParams.get('read') === '1' && c.length) { const last = c[c.length - 1].t; if (readAt(me, id) < last) { (me.readAt ||= {})[id] = last; touch(); } }
     return [200, { msgs: out }];
+  }
+  if (p === '/api/msg/recall' || p === '/api/msg/react' || p === '/api/msg/delete' || p === '/api/msg/clear') {
+    if (m !== 'POST') return [405, { error: 'method' }];
+    const t = db.users[body.with];
+    if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
+    const now = Date.now(), recent = (actTimes.get(me.id) || []).filter((x) => now - x < 10_000);
+    if (recent.length >= 30) return [429, { error: 'slow_down' }];
+    recent.push(now); actTimes.set(me.id, recent);
+    const a = chatOf(me, t.id), b = chatOf(t, me.id);
+    if (p === '/api/msg/clear') {                                      // xóa cả cuộc trò chuyện chỉ ở phía mình
+      const v = nextVer(a, b); let n = 0;
+      for (const x of a) if (!x.h) { x.h = 1; x.x = ''; delete x.rm; delete x.rt; x.v = v + n; n++; }
+      touch(); return [200, { ok: true, n }];
+    }
+    const id = Math.floor(+body.t);
+    const mine = a.find((x) => x.t === id); if (!mine || mine.h) return [404, { error: 'no_msg' }];
+    const theirs = b.find((x) => x.t === id);
+    const v = nextVer(a, b);
+    if (p === '/api/msg/recall') {                                     // chỉ người gửi được thu hồi, mất ở cả hai phía
+      if (!mine.m) return [403, { error: 'not_yours' }];
+      if (mine.d) return [200, { msg: msgOut(mine) }];
+      for (const [x, k] of [[mine, 1], [theirs, 2]]) if (x) { x.d = 1; x.x = ''; delete x.rm; delete x.rt; x.v = v + k; }
+      touch(); return [200, { msg: msgOut(mine) }];
+    }
+    if (p === '/api/msg/delete') {                                     // xóa chỉ ở phía mình
+      mine.h = 1; mine.x = ''; delete mine.rm; delete mine.rt; mine.v = v; touch(); return [200, { ok: true, msg: msgOut(mine) }];
+    }
+    // thả emoji: mỗi người một emoji cho mỗi tin; gửi lại đúng emoji đang chọn hoặc chuỗi rỗng = gỡ
+    if (mine.d) return [400, { error: 'recalled' }];
+    const e = typeof body.e === 'string' ? body.e : '';
+    if (e && !REACTIONS.includes(e)) return [400, { error: 'bad_emoji' }];
+    const next = e && mine.rm !== e ? e : '';
+    if (next) { mine.rm = next; if (theirs) theirs.rt = next; } else { delete mine.rm; if (theirs) delete theirs.rt; }
+    mine.v = v; if (theirs) theirs.v = v + 1;
+    touch(); return [200, { msg: msgOut(mine) }];
   }
   if (p === '/api/profile' && m === 'PUT') { me.profile = cleanProfile(body, vipOn(me)); touch(); return [200, snapshot(me)]; }
   if (p.startsWith('/api/profile/') && m === 'GET') {
