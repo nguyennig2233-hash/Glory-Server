@@ -717,7 +717,7 @@ function route(req, body, ip) {
 }
 
 const server = http.createServer((req, res) => {
-  const ip = (process.env.TRUST_PROXY && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
+  const ip = ((process.env.TRUST_PROXY || process.env.RENDER) && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
   const n = (hits.get(ip) || 0) + 1; hits.set(ip, n);
   const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
   if (n > 300) return send(429, { error: 'rate_limited' });
@@ -778,7 +778,7 @@ if (WebSocketServer) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20, perMessageDeflate: false });
   setInterval(() => { for (const ws of hostCtl.values()) { if (ws.alive === false) { try { ws.terminate(); } catch {} continue; } ws.alive = false; try { ws.ping(); } catch {} } }, 25_000).unref();
   server.on('upgrade', (req, socket, head) => {
-    const ip = (process.env.TRUST_PROXY && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
+    const ip = ((process.env.TRUST_PROXY || process.env.RENDER) && String(req.headers['x-forwarded-for'] || '').split(',')[0].trim()) || req.socket.remoteAddress || '';
     const n = (hits.get(ip) || 0) + 1; hits.set(ip, n);
     const deny = (c) => { try { socket.write(`HTTP/1.1 ${c}\r\nConnection: close\r\n\r\n`); } catch {} socket.destroy(); };
     let url; try { url = new URL(req.url, 'http://x'); } catch { return deny('400 Bad Request'); }
