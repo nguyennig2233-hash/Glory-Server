@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const Coins = require('./coins.js');
 
 const PORT = +process.env.PORT || 8787;
 const FILE = process.env.GLORY_DATA || path.join(__dirname, 'data.json');
@@ -113,7 +114,7 @@ const onlineIds = () => Object.keys(pres).filter((id) => Date.now() - pres[id].a
 const broadcast = (fromId, kind, data) => { const ids = onlineIds(); for (const id of ids) pushSig(id, fromId, '', 'bcast', { kind, ...(data || {}) }); return ids.length; };   // đẩy tới mọi client đang online ngay lập tức (long-poll đang mở)
 const CAPE_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,250000}$/;
 const TITLE_IMG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,16000}$/;
-const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), staff: !isOwner(u) && lvlOf(u) ? (lvlOf(u) >= 2 ? 'admin' : 'mod') : null, title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null });
+const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), staff: !isOwner(u) && lvlOf(u) ? (lvlOf(u) >= 2 ? 'admin' : 'mod') : null, title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null, cos: Coins.look(u) });
 const newKey = () => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; let b = ''; for (let i = 0; i < 10; i++) b += A[crypto.randomInt(A.length)]; return `GLR_${b}@${String(crypto.randomInt(1000)).padStart(3, '0')}`; };
 const tries = new Map();   // userId -> [thời điểm thử sai]
 function presenceFor(viewerId, id) {
@@ -189,7 +190,7 @@ function snapshot(me) {
   if (!me.fid) { me.fid = newFid(); touch(); }
   const r = rel(me.id), U = (id) => db.users[id];
   return {
-    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), capeBan: !!me.capeBan, fid: me.fid, plan: vipOn(me) ? { until: me.plan.until || null } : null },
+    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), capeBan: !!me.capeBan, fid: me.fid, coin: verified(me) ? Coins.view(me, Date.now()) : null, plan: vipOn(me) ? { until: me.plan.until || null } : null },
     friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id), unread: unreadOf(me, u.id), last: lastOf(me, u.id) })),
     incoming: r.in.map(U).filter(Boolean).map(brief),
     outgoing: r.out.map(U).filter(Boolean).map(brief),
@@ -259,7 +260,7 @@ async function verifyGoogle(idToken) {
 }
 const verified = (u) => !!(u && (u.mcUuid || u.gSub));                // chỉ tài khoản Microsoft hoặc Google mới dùng được bạn bè / chat / gọi
 const RENAME_MS = 7 * 86_400_000;
-const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search';
+const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search' || p.startsWith('/api/coin') || p.startsWith('/api/shop');
 
 function route(req, body, ip) {
   const url = new URL(req.url, 'http://x'), p = url.pathname, m = req.method;
@@ -323,7 +324,7 @@ function route(req, body, ip) {
   if (GATED(p) && !verified(me)) return [403, { error: 'need_login' }];
   if (p.startsWith('/api/dev/') && m === 'POST') {            // Dev Tab: chỉ tài khoản Google của chủ dự án
     const op = p.slice(9), T = db.titles, L = lvlOf(me);
-    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3, online: 1, health: 1, audit: 2, broadcast: 2, maint: 3, keydel: 3, capes: 2, capedel: 2, capeunban: 2 };
+    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, coins: 3, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3, online: 1, health: 1, audit: 2, broadcast: 2, maint: 3, keydel: 3, capes: 2, capedel: 2, capeunban: 2 };
     if (!(op in NEED)) return [404, { error: 'not_found' }];
     if (L < NEED[op]) return [403, { error: 'not_owner' }];
     const usersOf = (q) => Object.values(db.users).filter((u) => !q || u.name.toLowerCase().includes(q)).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 30)
@@ -355,6 +356,11 @@ function route(req, body, ip) {
       if (ids.length !== T.length || new Set(ids).size !== T.length || !ids.every((i) => T.some((x) => x.id === i))) return [400, { error: 'bad_order' }];
       T.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id)); audit(me, 'title.order', T.map((x) => x.name).join(' > '));
       touch(); return [200, dump()];
+    }
+    if (op === 'coins') {
+      const u = byName(body.name); if (!u || !verified(u)) return [404, { error: 'user_not_found' }];
+      const a = Coins.grant(u, body.amount, Date.now(), String(body.note || '').slice(0, 30)); if (!a) return [400, { error: 'bad_amount' }];
+      audit(me, 'coin.grant', `${a > 0 ? '+' : ''}${a} → ${u.name}`); touch(); return [200, { ok: true, bal: Coins.view(u, Date.now()).bal }];
     }
     if (op === 'grant') {
       const t = T.find((x) => x.id === body.title), u = byName(body.name);
@@ -468,6 +474,7 @@ function route(req, body, ip) {
       const srv = q.server && typeof q.server.address === 'string' ? { address: q.server.address.slice(0, 80), kind: q.server.kind === 'lan' ? 'lan' : 'public' } : null;
       pres[me.id] = { at: Date.now(), ip, mode: ['online', 'idle', 'dnd', 'invisible'].includes(q.mode) ? q.mode : 'online', status: ['online', 'playing'].includes(q.status) ? q.status : 'online', version: String(q.version || '').slice(0, 16), server: srv, lan };
     } else delete pres[me.id];
+    if (verified(me)) { const g = Coins.tickPlay(me, !!(q && typeof q === 'object' && q.status === 'playing'), Date.now()); if (g) touch(); }
     return [200, snapshot(me)];
   }
   if (p === '/api/premium/redeem' && m === 'POST') {
@@ -482,6 +489,13 @@ function route(req, body, ip) {
     rec.used = { by: me.id, at: now }; touch();
     return [200, { ...snapshot(me), plan: me.plan }];
   }
+  if (p === '/api/coin/daily' && m === 'POST') { const r = Coins.claimDaily(me, Date.now()); if (!r.ok) return [409, { error: r.error }]; touch(); return [200, { ...r, coin: Coins.view(me, Date.now()) }]; }
+  if (p === '/api/shop' && m === 'GET') return [200, { items: Coins.catalog(), coin: Coins.view(me, Date.now()) }];
+  if (p === '/api/shop/buy' && m === 'POST') {
+    const now = Date.now(), recent = (actTimes.get(me.id) || []).filter((x) => now - x < 10_000); if (recent.length >= 20) return [429, { error: 'slow_down' }]; recent.push(now); actTimes.set(me.id, recent);
+    const r = Coins.buy(me, String(body.item || ''), now); if (!r.ok) return [r.error === 'no_item' ? 404 : 409, { error: r.error }]; touch(); return [200, { ok: true, coin: Coins.view(me, now) }];
+  }
+  if (p === '/api/shop/equip' && m === 'POST') { const r = Coins.equip(me, String(body.slot || ''), String(body.item || '')); if (!r.ok) return [400, { error: r.error }]; touch(); return [200, { ok: true, coin: Coins.view(me, Date.now()) }]; }
   if (p === '/api/cape/set' && m === 'POST') {            // cape tự chọn của Premium: lưu lên máy chủ để nhân viên duyệt
     if (!vipOn(me)) return [403, { error: 'need_premium' }];
     if (me.capeBan) return [403, { error: 'cape_banned' }];
@@ -794,3 +808,4 @@ if (require.main === module) ready.then(() => server.listen(PORT, () => console.
 module.exports = server;
 module.exports.ready = ready;
 module.exports.setVerifier = (f) => { verifyMc = f; };
+if (process.env.GLORY_TEST) module.exports._db = () => db;   // chỉ dùng trong kiểm thử tự động
