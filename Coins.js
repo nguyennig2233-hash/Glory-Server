@@ -92,4 +92,4 @@ const catalog = () => ITEMS.map((i) => ({ id: i.id, kind: i.kind, price: i.price
 // Chủ dự án tặng / thu coin (có nhật ký)
 function grant(u, amount, now, note) { amount = Math.max(-100000, Math.min(100000, Math.floor(+amount || 0))); return add(u, amount, 'grant', note, now); }
 
-module.exports = { ITEMS, catalog, view, look, tickPlay, claimDaily, buy, equip, grant, ledger, dayOf, PLAY_MS_PER_COIN, PLAY_CAP_DAY, MAX_STEP };
+module.exports = { ITEMS, catalog, view, look, tickPlay, claimDaily, buy, equip, grant, add, ledger, dayOf, PLAY_MS_PER_COIN, PLAY_CAP_DAY, MAX_STEP };
