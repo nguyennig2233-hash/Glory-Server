@@ -1,0 +1,15 @@
+{
+  "name": "glory-social-server",
+  "version": "1.0.0",
+  "description": "Glory Social server (friends, profiles, presence)",
+  "main": "glory-server.js",
+  "scripts": {
+    "start": "node glory-server.js",
+    "check": "node check-deploy.js",
+    "postinstall": "node -e \"const fs=require('fs');if(fs.existsSync('check-deploy.js')){const r=require('child_process').spawnSync(process.execPath,['check-deploy.js'],{stdio:'inherit'});process.exit(r.status===0?0:1)}\""
+  },
+  "dependencies": { "ws": "^8.18.0" },
+  "engines": { "node": ">=20" },
+  "license": "UNLICENSED",
+  "private": true
+}
