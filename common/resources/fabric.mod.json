@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "glorycosmetics",
+  "version": "${version}",
+  "name": "Glory Cosmetics",
+  "description": "Draws the cosmetics you wear in Glory PvP Client (hats, back items, arms, legs) on your player.",
+  "authors": ["Glory PvP Client"],
+  "license": "All-Rights-Reserved",
+  "environment": "client",
+  "entrypoints": { "client": ["com.glory.cosmetics.GloryCosmeticsClient"] },
+  "depends": { "fabricloader": ">=0.15.0", "minecraft": "${mcdep}", "java": ">=${java}", "fabric-api": "*" }
+}

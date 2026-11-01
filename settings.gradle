@@ -1,0 +1,9 @@
+pluginManagement {
+    repositories {
+        maven { url = 'https://maven.fabricmc.net/' }
+        gradlePluginPortal()
+    }
+}
+rootProject.name = 'glory-cosmetics'
+// One Gradle project per Minecraft version. They share common/ (no Minecraft code) and one adapter folder per rendering era (adapters/).
+include 'mc1_16_5', 'mc1_17_1', 'mc1_18_2', 'mc1_19_2', 'mc1_19_4', 'mc1_20_1', 'mc1_20_4', 'mc1_20_6', 'mc1_21_1', 'mc1_21_3', 'mc1_21_4', 'mc1_21_5'

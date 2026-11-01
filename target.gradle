@@ -1,0 +1,19 @@
+// Shared by every mcX_Y_Z/build.gradle. Expects ext: mc, yarn, fabric, java, adapter, mcdep.
+version = '0.3.0'
+group = 'com.glory'
+base { archivesName = "glory-cosmetics-${mc}" }     // name contains "glory": the launcher copies it into mods by itself
+repositories { }
+dependencies {
+    minecraft "com.mojang:minecraft:${mc}"
+    mappings "net.fabricmc:yarn:${yarn}:v2"
+    modImplementation "net.fabricmc:fabric-loader:0.16.14"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${fabric}"
+}
+sourceSets.main.java.srcDirs = ['../common/java', "../adapters/${adapter}"]
+sourceSets.main.resources.srcDirs = ['../common/resources']
+processResources {
+    inputs.property 'version', project.version
+    filesMatching('fabric.mod.json') { expand 'version': project.version, 'mcdep': mcdep, 'java': "${java}" }
+}
+tasks.withType(JavaCompile).configureEach { it.options.release = java as int }
+java { withSourcesJar(); sourceCompatibility = JavaVersion.toVersion(java as int); targetCompatibility = JavaVersion.toVersion(java as int) }
