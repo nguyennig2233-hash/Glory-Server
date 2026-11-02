@@ -328,6 +328,15 @@ function route(req, body, ip) {
     while (keys.length < count) { const k = newKey(), h = sha(k); if (db.keys[h]) continue; db.keys[h] = { days, created: Date.now(), used: null }; keys.push(k); }
     touch(); return [201, { keys, days }];
   }
+  if (p === '/api/admin/rename' && m === 'POST') {          // lấy lại / đổi tên một tài khoản (vd khi mất tài khoản Owner): cần ADMIN_TOKEN. Người đang giữ tên đích bị đổi sang tên có hậu tố.
+    const ta = Buffer.from(sha(tok)), tb = Buffer.from(sha(ADMIN_TOKEN));
+    if (!ADMIN_TOKEN || !crypto.timingSafeEqual(ta, tb)) return [401, { error: 'unauthorized' }];
+    const to = String(body.to || ''), u = body.id ? db.users[String(body.id)] : byName(String(body.from || ''));
+    if (!NAME_RE.test(to)) return [400, { error: 'bad_name' }]; if (!u) return [404, { error: 'user_not_found' }];
+    const clash = byName(to); let displaced = null;
+    if (clash && clash !== u) { clash.name = (clash.name.slice(0, 12) + '_' + crypto.randomBytes(2).toString('hex')).slice(0, 16); displaced = clash.name; }
+    const was = u.name; u.name = to; touch(); return [200, { ok: true, was, name: u.name, displaced, verified: verified(u), kind: u.gSub ? 'google' : u.mcUuid ? 'microsoft' : 'offline' }];
+  }
   const me = tok && byToken(tok);
   if (!me) return [401, { error: 'unauthorized' }];
   if (me.banned && !isOwner(me)) return [403, { error: 'banned' }];
