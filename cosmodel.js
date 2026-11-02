@@ -7,7 +7,7 @@
   'use strict';
   const FACES = ['north', 'east', 'south', 'west', 'up', 'down'];
   const SLOTS = ['head', 'back', 'armR', 'armL', 'legR', 'legL'];
-  const LIM = { els: 64, coord: [-48, 64], tex: 98304, texDim: 256, name: 30, desc: 120, reach: 64, move: 32, scale: [0.1, 4] };
+  const LIM = { els: 256, coord: [-48, 64], tex: 98304, texDim: 256, name: 30, desc: 120, reach: 64, move: 32, scale: [0.1, 4] };
 const D2R = Math.PI / 180;
   const r3 = (v) => Math.round(v * 1000) / 1000;
   const fin = (v) => typeof v === 'number' && Number.isFinite(v);
