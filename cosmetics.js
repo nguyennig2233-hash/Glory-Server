@@ -1,95 +1,80 @@
-// Glory Coin: tiền trong client, CHỈ kiếm bằng hoạt động (giai đoạn 1: chưa bán bằng tiền thật, không rút, không chuyển cho nhau).
-// Mọi con số do máy chủ tính, client chỉ xin và hiển thị. Dữ liệu nằm trong u.coin (sổ cái) và u.owned / u.equip (cosmetic).
+// Chợ cosmetic 3D: người chơi (đã đăng nhập Microsoft/Google) đăng mô hình, đặt giá từ 50 Glory Coin, người khác mua bằng coin.
+// Tác giả nhận 70% mỗi lượt bán (phần còn lại biến mất khỏi hệ thống), mô hình phải được nhân viên duyệt trước khi lên chợ.
+// Dữ liệu: db.cosm[id]; người dùng: u.kown (đã sở hữu), u.kequip { head, back, armR, armL, legR, legL } (đang đeo).
 'use strict';
+const crypto = require('crypto'), Coins = require('./coins.js'), CM = require('./cosmodel.js');
+const MIN_PRICE = 50, MAX_PRICE = 5000, CUT = 0.7, MAX_UPLOADS = 12, MAX_PENDING = 3, GAP_MS = 30_000, PAGE = 24;
+const NAME_RE = /^[\p{L}\p{N} _'’\-.!]{2,30}$/u;
 
-const TZ_MS = 7 * 3600_000;                                          // ngày tính theo giờ Việt Nam (UTC+7)
-const dayOf = (t) => Math.floor((t + TZ_MS) / 86_400_000);
-const LOG_MAX = 60;
-const PLAY_MS_PER_COIN = 10 * 60_000;                                // 10 phút đang chơi = 1 coin
-const PLAY_CAP_DAY = 30;                                             // tối đa 30 coin / ngày từ thời gian chơi
-const MAX_STEP = 90_000;                                             // mỗi lần đồng bộ chỉ tính tối đa 90 giây (chống gửi trạng thái "playing" giả dài)
-const DAILY_BASE = 10, DAILY_STEP = 2, DAILY_MAX_STREAK = 10;        // thưởng ngày: 10 + 2 × chuỗi (tối đa 30)
-const MAX_BAL = 1_000_000;
+const live = (c) => c && c.status === 'live';
+const owns = (u, id) => Array.isArray(u.kown) && u.kown.includes(id);
+const meta = (c, me) => ({ id: c.id, name: c.name, desc: c.desc || '', slot: c.slot, price: c.price, by: c.byName, byId: c.by, at: c.at, sales: c.sales || 0, status: c.status, why: c.why || '',
+  owned: !!me && (owns(me, c.id) || c.by === me.id), mine: !!me && c.by === me.id, els: c.model.els.length });
 
-// Danh mục cosmetic (máy chủ giữ giá và loại; tên hiển thị do client dịch). badge = biểu tượng cạnh tên, color = màu tên, frame = viền thẻ hồ sơ.
-const ITEMS = [
-  { id: 'b_sword', kind: 'badge', price: 60, glyph: '⚔' }, { id: 'b_shield', kind: 'badge', price: 60, glyph: '🛡' }, { id: 'b_fire', kind: 'badge', price: 90, glyph: '🔥' },
-  { id: 'b_bolt', kind: 'badge', price: 90, glyph: '⚡' }, { id: 'b_skull', kind: 'badge', price: 120, glyph: '💀' }, { id: 'b_crown', kind: 'badge', price: 250, glyph: '👑' },
-  { id: 'c_gold', kind: 'color', price: 100, value: '#ffd24a' }, { id: 'c_cyan', kind: 'color', price: 100, value: '#4ad8ff' }, { id: 'c_pink', kind: 'color', price: 100, value: '#ff6ec7' },
-  { id: 'c_lime', kind: 'color', price: 100, value: '#9dff4a' }, { id: 'c_violet', kind: 'color', price: 150, value: '#b07cff' },
-  { id: 'f_gold', kind: 'frame', price: 200, value: '#ffd24a' }, { id: 'f_ice', kind: 'frame', price: 200, value: '#7fe6ff' }, { id: 'f_ember', kind: 'frame', price: 300, value: '#ff7a3d' },
-];
-const BY_ID = new Map(ITEMS.map((i) => [i.id, i]));
-const SLOT = { badge: 'badge', color: 'color', frame: 'frame' };
-
-function ledger(u) {
-  const c = (u.coin ||= {});
-  c.bal = Math.max(0, Math.min(MAX_BAL, Math.floor(+c.bal || 0)));
-  c.earned = Math.floor(+c.earned || 0); c.spent = Math.floor(+c.spent || 0); c.streak = Math.floor(+c.streak || 0);
-  c.log ||= []; return c;
-}
-function add(u, amount, kind, note, now) {
-  const c = ledger(u); amount = Math.floor(amount); if (!amount) return 0;
-  if (amount > 0) amount = Math.min(amount, MAX_BAL - c.bal);
-  else amount = -Math.min(-amount, c.bal);
-  if (!amount) return 0;
-  c.bal += amount; if (amount > 0) c.earned += amount; else c.spent -= amount;
-  c.log.unshift({ t: now, k: kind, a: amount, n: String(note || '').slice(0, 40) }); if (c.log.length > LOG_MAX) c.log.length = LOG_MAX;
-  return amount;
+function upload(db, me, body, now) {
+  const mine = Object.values(db.cosm).filter((c) => c.by === me.id && c.status !== 'removed');
+  if (mine.length >= MAX_UPLOADS) return { error: 'cm_limit' };
+  if (mine.filter((c) => c.status === 'pending').length >= MAX_PENDING) return { error: 'cm_pending' };
+  if (now - (me.kLast || 0) < GAP_MS) return { error: 'cm_fast' };
+  const name = String(body.name || '').trim().replace(/\s+/g, ' '); if (!NAME_RE.test(name)) return { error: 'cm_name' };
+  const desc = String(body.desc || '').trim().replace(/\s+/g, ' ').slice(0, CM.LIM.desc);
+  const slot = String(body.slot || ''); if (!CM.SLOTS.includes(slot)) return { error: 'cm_slot' };
+  const price = Math.floor(+body.price); if (!(price >= MIN_PRICE)) return { error: 'cm_price_min' }; if (price > MAX_PRICE) return { error: 'cm_price_max' };
+  const m = CM.clean(body.model); if (m.error) return m; const t = CM.cleanTex(body.tex); if (t.error) return t;
+  const dup = Object.values(db.cosm).find((c) => c.by === me.id && c.status !== 'removed' && c.name.toLowerCase() === name.toLowerCase()); if (dup) return { error: 'cm_dupname' };
+  const c = { id: crypto.randomBytes(5).toString('hex'), name, desc, slot, price, by: me.id, byName: me.name, at: now, status: 'pending', sales: 0, model: { ...m.model, w: t.w, h: t.h }, tex: t.tex };
+  db.cosm[c.id] = c; me.kLast = now; return { ok: true, item: meta(c, me) };
 }
 
-// Thưởng giờ chơi: gọi mỗi lần client đồng bộ trạng thái. Chỉ cộng khi trạng thái là "playing", mỗi lần tối đa MAX_STEP, tối đa PLAY_CAP_DAY coin / ngày.
-function tickPlay(u, playing, now) {
-  const c = ledger(u), last = c.playAt || 0; c.playAt = playing ? now : 0;
-  if (!playing || !last) return 0;
-  const d = dayOf(now); if (c.playDay !== d) { c.playDay = d; c.playToday = 0; }
-  c.playAcc = (c.playAcc || 0) + Math.max(0, Math.min(now - last, MAX_STEP));
-  let got = 0;
-  while (c.playAcc >= PLAY_MS_PER_COIN && c.playToday < PLAY_CAP_DAY) { c.playAcc -= PLAY_MS_PER_COIN; c.playToday++; got += add(u, 1, 'play', '', now); }
-  if (c.playToday >= PLAY_CAP_DAY) c.playAcc = Math.min(c.playAcc, PLAY_MS_PER_COIN - 1);
-  return got;
+function list(db, me, q) {
+  let all = Object.values(db.cosm).filter(live);
+  if (q.slot && CM.SLOTS.includes(q.slot)) all = all.filter((c) => c.slot === q.slot);
+  const s = String(q.q || '').trim().toLowerCase(); if (s) all = all.filter((c) => c.name.toLowerCase().includes(s) || c.byName.toLowerCase().includes(s));
+  const sort = q.sort === 'top' ? (a, b) => b.sales - a.sales || b.at - a.at : q.sort === 'cheap' ? (a, b) => a.price - b.price || b.at - a.at : (a, b) => b.at - a.at;
+  all.sort(sort); const off = Math.max(0, q.offset | 0);
+  return { items: all.slice(off, off + PAGE).map((c) => meta(c, me)), more: all.length > off + PAGE, total: all.length };
 }
-
-function dailyState(u, now) {
-  const c = ledger(u), d = dayOf(now), claimed = c.dailyDay === d;
-  const streakNow = c.dailyDay === d - 1 || claimed ? c.streak : 0;
-  const next = DAILY_BASE + DAILY_STEP * Math.min(claimed ? streakNow : streakNow, DAILY_MAX_STREAK);
-  return { claimed, streak: streakNow, next: claimed ? 0 : next };
+function mine(db, me) {
+  const all = Object.values(db.cosm), eq = me.kequip || {};
+  return { owned: all.filter((c) => (owns(me, c.id) || c.by === me.id) && c.status !== 'removed' || owns(me, c.id)).map((c) => meta(c, me)), uploads: all.filter((c) => c.by === me.id && c.status !== 'removed').map((c) => meta(c, me)), equip: Object.fromEntries(CM.SLOTS.map((k) => [k, eq[k] || null])) };
 }
-function claimDaily(u, now) {
-  const c = ledger(u), d = dayOf(now);
-  if (c.dailyDay === d) return { ok: false, error: 'already' };
-  c.streak = c.dailyDay === d - 1 ? c.streak + 1 : 1; c.dailyDay = d;
-  const amt = DAILY_BASE + DAILY_STEP * Math.min(c.streak - 1, DAILY_MAX_STREAK);
-  add(u, amt, 'daily', 'x' + c.streak, now); return { ok: true, amount: amt };
+// Mô hình đầy đủ (nặng): chỉ người tác giả / chủ sở hữu / nhân viên / bất kỳ ai khi đã lên chợ
+function item(db, me, id, staff) {
+  const c = db.cosm[id]; if (!c) return null;
+  if (!live(c) && !(me && (c.by === me.id || owns(me, c.id) || staff))) return null;
+  return { ...meta(c, me), model: c.model, tex: c.tex };
 }
-
-const owned = (u) => (Array.isArray(u.owned) ? u.owned.filter((x) => BY_ID.has(x)) : []);
-function buy(u, id, now) {
-  const it = BY_ID.get(id); if (!it) return { ok: false, error: 'no_item' };
-  if (owned(u).includes(id)) return { ok: false, error: 'owned' };
-  const c = ledger(u); if (c.bal < it.price) return { ok: false, error: 'poor' };
-  add(u, -it.price, 'buy', id, now); (u.owned ||= []).push(id); return { ok: true };
+function buy(db, me, id, now) {
+  const c = db.cosm[id]; if (!live(c)) return { error: 'cm_gone' };
+  if (c.by === me.id || owns(me, id)) return { error: 'cm_owned' };
+  if (Coins.ledger(me).bal < c.price) return { error: 'cm_poor' };
+  Coins.add(me, -c.price, 'cbuy', c.name, now); (me.kown ||= []).push(id);
+  const cut = Math.floor(c.price * CUT), author = db.users[c.by]; if (author && cut > 0) Coins.add(author, cut, 'csale', c.name, now);
+  c.sales = (c.sales || 0) + 1; return { ok: true, cut };
 }
-function equip(u, slot, id) {
-  if (!SLOT[slot]) return { ok: false, error: 'bad_slot' };
-  const eq = (u.equip ||= {});
-  if (!id) { delete eq[slot]; return { ok: true }; }
-  const it = BY_ID.get(id); if (!it || it.kind !== slot || !owned(u).includes(id)) return { ok: false, error: 'not_owned' };
+function equip(db, me, slot, id) {
+  if (!CM.SLOTS.includes(slot)) return { error: 'cm_slot' };
+  const eq = (me.kequip ||= {}); if (!id) { delete eq[slot]; return { ok: true }; }
+  const c = db.cosm[id]; if (!c || c.slot !== slot || !(owns(me, id) || c.by === me.id) || c.status === 'removed' && !owns(me, id)) return { error: 'cm_notyours' };
+  if (c.status === 'pending' && c.by !== me.id) return { error: 'cm_notyours' };
   eq[slot] = id; return { ok: true };
 }
-// Cosmetic người khác nhìn thấy (đưa vào thẻ bạn bè / hồ sơ)
-function look(u) {
-  const e = u.equip || {}, o = {};
-  for (const s of Object.keys(SLOT)) { const it = e[s] && BY_ID.get(e[s]); if (it && owned(u).includes(it.id)) o[s] = it.glyph || it.value; }
+// Tác giả gỡ khỏi chợ (người đã mua vẫn dùng được) hoặc nhân viên gỡ vì vi phạm
+function remove(db, me, id, isStaff) {
+  const c = db.cosm[id]; if (!c) return { error: 'cm_gone' };
+  if (c.by !== me.id && !isStaff) return { error: 'forbidden' };
+  if (!c.sales) { delete db.cosm[id]; for (const u of Object.values(db.users)) { if (u.kequip) for (const k of Object.keys(u.kequip)) if (u.kequip[k] === id) delete u.kequip[k]; } return { ok: true, gone: true, name: c.name, by: c.byName }; }
+  c.status = 'removed'; return { ok: true, name: c.name, by: c.byName };
+}
+function review(db, id, ok, why) {
+  const c = db.cosm[id]; if (!c || c.status !== 'pending') return { error: 'cm_gone' };
+  c.status = ok ? 'live' : 'rejected'; c.why = ok ? '' : String(why || '').slice(0, 100); c.reviewedAt = Date.now(); return { ok: true, name: c.name, by: c.byName };
+}
+const queue = (db) => Object.values(db.cosm).filter((c) => c.status === 'pending').sort((a, b) => a.at - b.at).slice(0, 50).map((c) => ({ ...meta(c, null), model: c.model, tex: c.tex }));
+// Cosmetic người khác thấy (gắn vào thẻ bạn bè): chỉ id của món đang đeo và còn hợp lệ
+function worn(db, u) {
+  const eq = u.kequip; if (!eq) return null; const o = {};
+  for (const s of CM.SLOTS) { const c = eq[s] && db.cosm[eq[s]]; if (c && c.slot === s && (c.status === 'live' || owns(u, c.id) || c.by === u.id) && c.status !== 'rejected') o[s] = c.id; }
   return Object.keys(o).length ? o : null;
 }
-function view(u, now) {
-  const c = ledger(u);
-  return { bal: c.bal, earned: c.earned, spent: c.spent, daily: dailyState(u, now), play: { today: c.playToday && c.playDay === dayOf(now) ? c.playToday : 0, cap: PLAY_CAP_DAY, perCoinMin: PLAY_MS_PER_COIN / 60_000 }, log: c.log.slice(0, 20), owned: owned(u), equip: { ...(u.equip || {}) } };
-}
-const catalog = () => ITEMS.map((i) => ({ id: i.id, kind: i.kind, price: i.price, glyph: i.glyph || '', value: i.value || '' }));
-// Chủ dự án tặng / thu coin (có nhật ký)
-function grant(u, amount, now, note) { amount = Math.max(-100000, Math.min(100000, Math.floor(+amount || 0))); return add(u, amount, 'grant', note, now); }
-
-module.exports = { ITEMS, catalog, view, look, tickPlay, claimDaily, buy, equip, grant, add, ledger, dayOf, PLAY_MS_PER_COIN, PLAY_CAP_DAY, MAX_STEP };
+module.exports = { MIN_PRICE, MAX_PRICE, CUT, upload, list, mine, item, buy, equip, remove, review, queue, worn, meta };
