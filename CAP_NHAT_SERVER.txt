@@ -1,0 +1,14 @@
+CẬP NHẬT SERVER (để gửi ảnh/file trong chat không bị lỗi bad_json)
+
+Bản server đang chạy trên máy chủ của bạn là bản CŨ, chưa có phần gửi file. Launcher gửi ảnh nhưng server không hiểu nên báo "bad_json".
+
+CÁCH LÀM (từng bước):
+1. Mở nơi bạn đang host server (GitHub repo của server, hoặc trang Render/host bạn dùng).
+2. Thay các file cùng tên bằng 3 file trong thư mục này: glory-server.js, coins.js, cosmetics.js
+   (chép đè lên file cũ (CHỈ cần glory-server.js nếu coins.js và cosmetics.js đã có sẵn trên GitHub), giữ nguyên file data.json và package.json của bạn).
+3. Lưu / Commit. Nếu host tự deploy lại thì đợi vài phút; nếu không thì bấm "Deploy" / "Restart".
+4. Mở lại launcher, thử gửi ảnh.
+
+LƯU Ý:
+- Ảnh/file được lưu trên ổ đĩa của server (tự xóa sau 30 ngày). Host miễn phí như Render có thể xóa ổ đĩa mỗi lần khởi động lại, ảnh cũ sẽ mất (tin nhắn chữ thì vẫn còn).
+- Giới hạn: mỗi file tối đa 100 MB, mỗi người 2 GB, tổng 8 GB (chỉnh bằng biến FILE_USER_GB, FILES_TOTAL_GB, FILE_TTL_DAYS).

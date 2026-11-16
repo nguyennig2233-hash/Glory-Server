@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const Coins = require('./coins.js');
 const Cosm = require('./cosmetics.js');
 
+process.on('uncaughtException', (e) => console.error('uncaught', e)); process.on('unhandledRejection', (e) => console.error('unhandled', e));
 const PORT = +process.env.PORT || 8787;
 const FILE = process.env.GLORY_DATA || path.join(__dirname, 'data.json');
 const ONLINE_MS = 45_000;
@@ -37,7 +38,7 @@ async function loadRemote() {
   const [meta, ids] = await upPipe([['GET', 'glory:meta'], ['SMEMBERS', 'glory:ids']]);
   const m = meta ? JSON.parse(meta) : {};
   db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [], news: m.news || null, audit: m.audit || [], maint: m.maint || { on: false } }; savedRemote.set('glory:meta', meta || '');
-  db.capes = {}; db.cosm = {};
+  db.capes = {}; db.cosm = {}; db.files = {};
   const kids = (await upPipe([['SMEMBERS', 'glory:kids']]))[0] || [];
   for (let i = 0; i < kids.length; i += 20) {
     const part = kids.slice(i, i + 20), vals = (await upPipe([['MGET', ...part.map((x) => 'glory:k:' + x)]]))[0];
@@ -52,7 +53,7 @@ async function loadRemote() {
     const part = ids.slice(i, i + 100), vals = (await upPipe([['MGET', ...part.map((x) => 'glory:u:' + x)]]))[0];
     part.forEach((id, k) => { if (vals[k]) { try { db.users[id] = JSON.parse(vals[k]); savedRemote.set('glory:u:' + id, vals[k]); } catch {} } });
   }
-  db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false }; db.capes ||= {}; db.cosm ||= {};
+  db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false }; db.capes ||= {}; db.cosm ||= {}; db.files ||= {};
 }
 async function flushRemote() {
   const batches = [[]]; let cur = 0;
