@@ -125,7 +125,7 @@ const onlineIds = () => Object.keys(pres).filter((id) => Date.now() - pres[id].a
 const broadcast = (fromId, kind, data) => { const ids = onlineIds(); for (const id of ids) pushSig(id, fromId, '', 'bcast', { kind, ...(data || {}) }); return ids.length; };   // đẩy tới mọi client đang online ngay lập tức (long-poll đang mở)
 const CAPE_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,250000}$/;
 const TITLE_IMG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,16000}$/;
-const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), staff: !isOwner(u) && lvlOf(u) ? (lvlOf(u) >= 2 ? 'admin' : 'mod') : null, title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null, cos: Coins.look(u), kc: Cosm.worn(db, u) });
+const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), staff: !isOwner(u) && lvlOf(u) ? (lvlOf(u) >= 2 ? 'admin' : 'mod') : null, title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null, cos: Coins.look(u), kc: Cosm.worn(db, u), sk: u.skin ? u.skin.h : 0 });
 const newKey = () => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; let b = ''; for (let i = 0; i < 10; i++) b += A[crypto.randomInt(A.length)]; return `GLR_${b}@${String(crypto.randomInt(1000)).padStart(3, '0')}`; };
 const tries = new Map();   // userId -> [thời điểm thử sai]
 function presenceFor(viewerId, id) {
@@ -139,17 +139,17 @@ function presenceFor(viewerId, id) {
   return out;
 }
 // Tin nhắn: mỗi người giữ bản của mình trong u.chat[idBạn] = [{t, m:1 nếu mình gửi, x}] (t tăng dần trong mỗi cuộc trò chuyện, đồng thời là mã tin)
-const MSG_MAX = 500, MSG_PER_CHAT = 100, MSG_PER_USER = 1000;
+const MSG_MAX = 2000, MSG_PER_CHAT = 100, MSG_PER_USER = 1000;
 const chatOf = (u, id) => ((u.chat ||= {})[id] ||= []);
 const readAt = (u, id) => ((u.readAt || {})[id] || 0);
 const unreadOf = (u, id) => (u.chat && u.chat[id] ? u.chat[id].filter((x) => !x.m && !x.h && !x.d && x.t > readAt(u, id)).length : 0);
-const lastOf = (u, id) => { const c = u.chat && u.chat[id]; let x = null; if (c) for (let i = c.length - 1; i >= 0; i--) if (!c[i].h) { x = c[i]; break; } return x ? { t: x.t, m: x.m ? 1 : 0, x: x.d ? '' : x.x.slice(0, 80), d: x.d ? 1 : 0 } : null; };
+const lastOf = (u, id) => { const c = u.chat && u.chat[id]; let x = null; if (c) for (let i = c.length - 1; i >= 0; i--) if (!c[i].h) { x = c[i]; break; } return x ? { t: x.t, m: x.m ? 1 : 0, x: x.d ? '' : x.x.slice(0, 80), d: x.d ? 1 : 0, a: x.a && !x.d ? (x.a.k === 'img' ? 1 : 2) : 0 } : null; };
 // Mỗi tin có mã phiên bản v (mặc định = t, tăng lên mỗi lần thu hồi / thả emoji / xóa) để máy khách chỉ cần hỏi "những gì mới hơn v"
 const REACTIONS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👎'];
 const verOf = (x) => x.v || x.t;
 const maxVer = (c) => c.reduce((n, x) => Math.max(n, verOf(x)), 0);
 const nextVer = (...chats) => Math.max(Date.now(), ...chats.map(maxVer)) + 1;
-const msgOut = (x) => { const o = { t: x.t, v: verOf(x), m: x.m ? 1 : 0, x: x.h || x.d ? '' : x.x }; if (x.d) o.d = 1; if (x.h) o.h = 1; if (x.rm) o.rm = x.rm; if (x.rt) o.rt = x.rt; return o; };
+const msgOut = (x) => { const o = { t: x.t, v: verOf(x), m: x.m ? 1 : 0, x: x.h || x.d ? '' : x.x }; if (x.d) o.d = 1; if (x.h) o.h = 1; if (x.rm) o.rm = x.rm; if (x.rt) o.rt = x.rt; if (x.a && !x.h && !x.d) o.a = x.a; if (x.pn && !x.h && !x.d) o.pn = 1; if (x.fw && !x.h && !x.d) o.fw = 1; return o; };
 function trimChats(u) {
   let total = Object.values(u.chat || {}).reduce((n, c) => n + c.length, 0);
   while (total > MSG_PER_USER) {                                    // quá nhiều: bỏ tin cũ nhất ở cuộc trò chuyện dài nhất
@@ -201,8 +201,8 @@ function snapshot(me) {
   if (!me.fid) { me.fid = newFid(); touch(); }
   const r = rel(me.id), U = (id) => db.users[id];
   return {
-    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), capeBan: !!me.capeBan, fid: me.fid, coin: verified(me) ? Coins.view(me, Date.now()) : null, plan: vipOn(me) ? { until: me.plan.until || null } : null },
-    friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id), unread: unreadOf(me, u.id), last: lastOf(me, u.id) })),
+    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), capeBan: !!me.capeBan, fid: me.fid, labels: me.labels || [], coin: verified(me) ? Coins.view(me, Date.now()) : null, plan: vipOn(me) ? { until: me.plan.until || null } : null },
+    friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id), unread: unreadOf(me, u.id), last: lastOf(me, u.id), cm: (me.cm && me.cm[u.id]) || null })),
     incoming: r.in.map(U).filter(Boolean).map(brief),
     outgoing: r.out.map(U).filter(Boolean).map(brief),
     news: db.news || null,
@@ -254,6 +254,64 @@ const capeOut = (c, me) => ({ id: c.id, name: c.name, by: (db.users[c.by] || {})
   rep: me && lvlOf(me) >= 2 ? Object.keys(c.rep || {}).length : undefined });
 const CAPE_REPORT_WHY = ['inappropriate', 'stolen', 'offensive', 'other'];
 
+// ---- Tệp đính kèm trong chat (ảnh / file tối đa 100 MB), lưu trên ổ đĩa của máy chủ, tự xóa sau FILE_TTL_DAYS ngày ----
+const FILES_DIR = process.env.GLORY_FILES || path.join(path.dirname(FILE), 'files');
+const FILE_MAX = 100 * 1024 * 1024, FILE_TTL = (+process.env.FILE_TTL_DAYS || 30) * 86_400_000;
+const FILE_USER_MAX = (+process.env.FILE_USER_GB || 2) * 1024 ** 3, FILE_TOTAL_MAX = (+process.env.FILES_TOTAL_GB || 8) * 1024 ** 3;
+db.files ||= {};
+const fileTimes = new Map(), fileOk = (id) => /^[a-f0-9]{24}$/.test(String(id || ''));
+const fileSum = (uid) => Object.values(db.files).reduce((n, f) => n + (!uid || f.o === uid ? f.s : 0), 0);
+const IMG_INLINE = { 'image/png': 1, 'image/jpeg': 1, 'image/gif': 1, 'image/webp': 1 };
+const cleanName = (n) => String(n || 'file').replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, '_').replace(/^\.+/, '').trim().slice(0, 120) || 'file';
+const kindOf = (t) => (IMG_INLINE[t] ? 'img' : 'file');
+function rmFile(id) { const f = db.files[id]; if (!f) return; delete db.files[id]; try { fs.unlinkSync(path.join(FILES_DIR, id)); } catch {} touch(); }
+setInterval(() => { const t = Date.now(); for (const [id, f] of Object.entries(db.files)) if (t - f.at > FILE_TTL) rmFile(id); for (const [k, v] of fileTimes) if (!v.some((x) => t - x < 600_000)) fileTimes.delete(k); }, 3_600_000).unref();
+function fileUser(req) {                                            // xác thực cho tải lên / tải xuống tệp (đi ngoài route JSON)
+  const tok = (req.headers.authorization || '').replace(/^Bearer /, ''), me = tok && byToken(tok);
+  if (!me) return { code: 401, error: 'unauthorized' };
+  if (me.banned && !isOwner(me)) return { code: 403, error: 'banned' };
+  if (db.maint.on && !lvlOf(me)) return { code: 503, error: 'maintenance' };
+  if (!verified(me)) return { code: 403, error: 'need_login' };
+  return { me };
+}
+function fileUpload(req, res, send) {
+  const url = new URL(req.url, 'http://x'), a = fileUser(req); if (a.error) { send(a.code, { error: a.error }); return req.destroy(); }
+  const me = a.me, t = db.users[url.searchParams.get('to') || ''];
+  const bad = (c, e) => { send(c, { error: e }); req.destroy(); };
+  if (me.muted) return bad(403, 'muted');
+  if (!t || !rel(me.id).friends.includes(t.id)) return bad(403, 'not_friends');
+  const len = +req.headers['content-length'] || 0;
+  if (!len) return bad(411, 'length_required');
+  if (len > FILE_MAX) return bad(413, 'file_too_big');
+  const now = Date.now(), rec = (fileTimes.get(me.id) || []).filter((x) => now - x < 600_000);
+  if (rec.length >= 12) return bad(429, 'slow_down');
+  if (fileSum(me.id) + len > FILE_USER_MAX || fileSum() + len > FILE_TOTAL_MAX) return bad(507, 'storage_full');
+  rec.push(now); fileTimes.set(me.id, rec);
+  let name = url.searchParams.get('name') || 'file'; try { name = decodeURIComponent(name); } catch {}
+  name = cleanName(name); const mt = String(url.searchParams.get('type') || '').toLowerCase(), type = /^[a-z]+\/[a-z0-9.+-]{1,40}$/.test(mt) ? mt : 'application/octet-stream';
+  const id = crypto.randomBytes(12).toString('hex'); try { fs.mkdirSync(FILES_DIR, { recursive: true }); } catch {}
+  const tmp = path.join(FILES_DIR, id + '.part'), ws = fs.createWriteStream(tmp); let got = 0, dead = false;
+  const kill = (c, e) => { if (dead) return; dead = true; try { ws.destroy(); } catch {} try { fs.unlinkSync(tmp); } catch {} if (c) send(c, { error: e }); try { req.destroy(); } catch {} };
+  req.on('data', (c) => { got += c.length; if (got > len || got > FILE_MAX) kill(413, 'file_too_big'); });
+  req.on('aborted', () => kill(0)); req.on('error', () => kill(0)); ws.on('error', () => kill(500, 'server_error'));
+  ws.on('finish', () => {
+    if (dead) return;
+    if (got !== len) return kill(400, 'bad_length');
+    try { fs.renameSync(tmp, path.join(FILES_DIR, id)); } catch { return kill(500, 'server_error'); }
+    db.files[id] = { o: me.id, n: name, s: got, t: type, at: Date.now(), acl: [me.id, t.id] }; touch();
+    send(201, { f: { f: id, n: name, s: got, k: kindOf(type) } });
+  });
+  req.pipe(ws);
+}
+function fileDownload(req, res, send) {
+  const url = new URL(req.url, 'http://x'), a = fileUser(req); if (a.error) return send(a.code, { error: a.error });
+  const id = url.searchParams.get('id'), f = fileOk(id) && db.files[id];
+  if (!f || !f.acl.includes(a.me.id)) return send(404, { error: 'no_file' });
+  const fp = path.join(FILES_DIR, id); let st; try { st = fs.statSync(fp); } catch { rmFile(id); return send(404, { error: 'no_file' }); }
+  res.writeHead(200, { 'Content-Type': IMG_INLINE[f.t] ? f.t : 'application/octet-stream', 'Content-Length': st.size, 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': (IMG_INLINE[f.t] ? 'inline' : 'attachment') + "; filename*=UTF-8''" + encodeURIComponent(f.n), 'Cache-Control': 'private, max-age=3600' });
+  fs.createReadStream(fp).pipe(res);
+}
+
 const hits = new Map();
 setInterval(() => hits.clear(), 60_000).unref();
 
@@ -271,7 +329,7 @@ async function verifyGoogle(idToken) {
 }
 const verified = (u) => !!(u && (u.mcUuid || u.gSub));                // chỉ tài khoản Microsoft hoặc Google mới dùng được bạn bè / chat / gọi
 const RENAME_MS = 7 * 86_400_000;
-const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search' || p.startsWith('/api/coin') || p.startsWith('/api/shop') || p.startsWith('/api/cosm');
+const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p.startsWith('/api/chat/') || p.startsWith('/api/file/') || p.startsWith('/api/skin/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search' || p.startsWith('/api/coin') || p.startsWith('/api/shop') || p.startsWith('/api/cosm');
 
 function route(req, body, ip) {
   const url = new URL(req.url, 'http://x'), p = url.pathname, m = req.method;
@@ -710,16 +768,19 @@ function route(req, body, ip) {
     if (me.muted) return [403, { error: 'muted' }];
     const t = db.users[body.to], text = typeof body.text === 'string' ? body.text.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim() : '';
     if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
-    if (!text || [...text].length > MSG_MAX) return [400, { error: 'bad_msg' }];
+    const fl = body.file ? (fileOk(body.file) && db.files[body.file]) : null;
+    if (body.file && (!fl || fl.o !== me.id || !fl.acl.includes(t.id))) return [400, { error: 'bad_file' }];
+    const att = fl ? { f: body.file, n: fl.n, s: fl.s, k: kindOf(fl.t) } : null; if (att && att.k === 'img' && body.w > 0 && body.h > 0) { att.w = Math.min(20000, body.w | 0); att.h = Math.min(20000, body.h | 0); }
+    if ((!text && !att) || [...text].length > MSG_MAX) return [400, { error: 'bad_msg' }];
     const now = Date.now(), recent = (sendTimes.get(me.id) || []).filter((x) => now - x < 10_000);
     if (recent.length >= 12) return [429, { error: 'slow_down' }];
     recent.push(now); sendTimes.set(me.id, recent);
     const a = chatOf(me, t.id), b = chatOf(t, me.id);
     const at = nextVer(a, b);
-    a.push({ t: at, m: 1, x: text }); b.push({ t: at, x: text });
+    a.push(att ? { t: at, m: 1, x: text, a: att } : { t: at, m: 1, x: text }); b.push(att ? { t: at, x: text, a: att } : { t: at, x: text });
     for (const [u, c] of [[me, a], [t, b]]) { if (c.length > MSG_PER_CHAT) c.splice(0, c.length - MSG_PER_CHAT); trimChats(u); }
     (me.readAt ||= {})[t.id] = at;                                   // gửi tin = đã đọc mọi thứ trước đó
-    touch(); return [201, { msg: { t: at, m: 1, x: text } }];
+    touch(); return [201, { msg: msgOut(a[a.length - 1]) }];
   }
   if (p === '/api/msg/list' && m === 'GET') {
     const id = url.searchParams.get('with') || '', after = +url.searchParams.get('after') || 0;
@@ -729,7 +790,7 @@ function route(req, body, ip) {
     if (url.searchParams.get('read') === '1' && c.length) { const last = c[c.length - 1].t; if (readAt(me, id) < last) { (me.readAt ||= {})[id] = last; touch(); } }
     return [200, { msgs: out }];
   }
-  if (p === '/api/msg/recall' || p === '/api/msg/react' || p === '/api/msg/delete' || p === '/api/msg/clear') {
+  if (p === '/api/msg/recall' || p === '/api/msg/react' || p === '/api/msg/delete' || p === '/api/msg/clear' || p === '/api/msg/pin') {
     if (m !== 'POST') return [405, { error: 'method' }];
     const t = db.users[body.with];
     if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
@@ -739,7 +800,7 @@ function route(req, body, ip) {
     const a = chatOf(me, t.id), b = chatOf(t, me.id);
     if (p === '/api/msg/clear') {                                      // xóa cả cuộc trò chuyện chỉ ở phía mình
       const v = nextVer(a, b); let n = 0;
-      for (const x of a) if (!x.h) { x.h = 1; x.x = ''; delete x.rm; delete x.rt; x.v = v + n; n++; }
+      for (const x of a) if (!x.h) { x.h = 1; x.x = ''; delete x.rm; delete x.rt; delete x.a; delete x.pn; x.v = v + n; n++; }
       touch(); return [200, { ok: true, n }];
     }
     const id = Math.floor(+body.t);
@@ -749,20 +810,74 @@ function route(req, body, ip) {
     if (p === '/api/msg/recall') {                                     // chỉ người gửi được thu hồi, mất ở cả hai phía
       if (!mine.m) return [403, { error: 'not_yours' }];
       if (mine.d) return [200, { msg: msgOut(mine) }];
-      for (const [x, k] of [[mine, 1], [theirs, 2]]) if (x) { x.d = 1; x.x = ''; delete x.rm; delete x.rt; x.v = v + k; }
+      for (const [x, k] of [[mine, 1], [theirs, 2]]) if (x) { x.d = 1; x.x = ''; delete x.rm; delete x.rt; delete x.a; delete x.pn; x.v = v + k; }
       touch(); return [200, { msg: msgOut(mine) }];
     }
     if (p === '/api/msg/delete') {                                     // xóa chỉ ở phía mình
-      mine.h = 1; mine.x = ''; delete mine.rm; delete mine.rt; mine.v = v; touch(); return [200, { ok: true, msg: msgOut(mine) }];
+      mine.h = 1; mine.x = ''; delete mine.rm; delete mine.rt; delete mine.a; delete mine.pn; mine.v = v; touch(); return [200, { ok: true, msg: msgOut(mine) }];
+    }
+    if (p === '/api/msg/pin') {                                         // ghim tin nhắn: hiện ở cả hai phía, tối đa 5 tin mỗi cuộc trò chuyện
+      if (mine.d) return [400, { error: 'recalled' }];
+      const on = mine.pn ? 0 : 1; if (on && a.filter((x) => x.pn && !x.h && !x.d).length >= 5) return [400, { error: 'pin_limit' }];
+      if (on) { mine.pn = 1; if (theirs) theirs.pn = 1; } else { delete mine.pn; if (theirs) delete theirs.pn; }
+      mine.v = v; if (theirs) theirs.v = v + 1; touch(); return [200, { msg: msgOut(mine) }];
     }
     // thả emoji: mỗi người một emoji cho mỗi tin; gửi lại đúng emoji đang chọn hoặc chuỗi rỗng = gỡ
     if (mine.d) return [400, { error: 'recalled' }];
     const e = typeof body.e === 'string' ? body.e : '';
-    if (e && !REACTIONS.includes(e)) return [400, { error: 'bad_emoji' }];
+    if (e && (e.length > 16 || !/^\p{Extended_Pictographic}/u.test(e))) return [400, { error: 'bad_emoji' }];
     const next = e && mine.rm !== e ? e : '';
     if (next) { mine.rm = next; if (theirs) theirs.rt = next; } else { delete mine.rm; if (theirs) delete theirs.rt; }
     mine.v = v; if (theirs) theirs.v = v + 1;
     touch(); return [200, { msg: msgOut(mine) }];
+  }
+  if (p === '/api/msg/forward' && m === 'POST') {                      // chuyển tiếp một tin (kèm tệp) cho tối đa 5 người bạn
+    if (me.muted) return [403, { error: 'muted' }];
+    const src = db.users[body.with]; if (!src || !rel(me.id).friends.includes(src.id)) return [403, { error: 'not_friends' }];
+    const orig = chatOf(me, src.id).find((x) => x.t === Math.floor(+body.t)); if (!orig || orig.h || orig.d) return [404, { error: 'no_msg' }];
+    const targets = [...new Set(Array.isArray(body.to) ? body.to.map(String) : [])].slice(0, 5).map((id) => db.users[id]).filter((u) => u && u.id !== me.id && rel(me.id).friends.includes(u.id));
+    if (!targets.length) return [400, { error: 'no_target' }];
+    const now = Date.now(), recent = (sendTimes.get(me.id) || []).filter((x) => now - x < 10_000);
+    if (recent.length + targets.length > 12) return [429, { error: 'slow_down' }];
+    for (const u of targets) recent.push(now); sendTimes.set(me.id, recent);
+    const f = orig.a && db.files[orig.a.f]; if (orig.a && !f) return [410, { error: 'file_gone' }];
+    for (const u of targets) {
+      if (f && !f.acl.includes(u.id)) f.acl.push(u.id);
+      const a = chatOf(me, u.id), b = chatOf(u, me.id), at = nextVer(a, b), base = { x: orig.x, fw: 1 }; if (orig.a) base.a = { ...orig.a };
+      a.push({ t: at, m: 1, ...base }); b.push({ t: at, ...base });
+      for (const [w, c] of [[me, a], [u, b]]) { if (c.length > MSG_PER_CHAT) c.splice(0, c.length - MSG_PER_CHAT); trimChats(w); }
+      (me.readAt ||= {})[u.id] = at;
+    }
+    touch(); return [201, { ok: true, n: targets.length }];
+  }
+  if (p === '/api/skin/set' && m === 'POST') {                         // skin tự chọn của tài khoản offline/Google: để bạn bè thấy đúng skin
+    if (body.png == null) { delete me.skin; touch(); return [200, { ok: true, sk: 0 }]; }
+    const buf = Buffer.from(String(body.png), 'base64');
+    if (buf.length < 100 || buf.length > 200 * 1024 || buf.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a' || buf.readUInt32BE(16) !== 64 || buf.readUInt32BE(20) !== 64) return [400, { error: 'bad_skin' }];
+    const h = crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12);
+    me.skin = { d: buf.toString('base64'), m: body.model === 'slim' ? 'slim' : 'classic', h }; touch(); return [200, { ok: true, sk: h }];
+  }
+  if (p === '/api/skin/get' && m === 'POST') {
+    const t = db.users[body.id]; if (!t || !t.skin || (t.id !== me.id && !rel(me.id).friends.includes(t.id))) return [404, { error: 'no_skin' }];
+    return [200, { png: t.skin.d, model: t.skin.m, sk: t.skin.h }];
+  }
+  if (p === '/api/chat/meta' && m === 'POST') {                        // ghim cuộc trò chuyện / gắn nhãn
+    const t = db.users[body.with]; if (!t || !rel(me.id).friends.includes(t.id)) return [403, { error: 'not_friends' }];
+    const cm = ((me.cm ||= {})[t.id] ||= {});
+    if (body.pin != null) { if (body.pin) cm.pin = 1; else delete cm.pin; }
+    if (body.label != null) { const id = String(body.label); if (!id) delete cm.lb; else if ((me.labels || []).some((l) => l.id === id)) cm.lb = id; else return [400, { error: 'bad_label' }]; }
+    if (!Object.keys(cm).length) delete me.cm[t.id];
+    touch(); return [200, snapshot(me)];
+  }
+  if (p === '/api/chat/labels' && m === 'POST') {                      // danh sách nhãn của riêng mình (tối đa 6)
+    const src = Array.isArray(body.labels) ? body.labels.slice(0, 6) : [], old = me.labels || [], out = [];
+    for (const l of src) {
+      const n = typeof l.n === 'string' ? l.n.trim().slice(0, 16) : ''; if (!n) continue;
+      const id = old.some((o) => o.id === l.id) ? l.id : crypto.randomBytes(3).toString('hex');
+      out.push({ id, n, c: /^#[0-9a-f]{6}$/i.test(l.c) ? l.c : '#ffbe2e' });
+    }
+    me.labels = out; for (const cm of Object.values(me.cm || {})) if (cm.lb && !out.some((l) => l.id === cm.lb)) delete cm.lb;
+    touch(); return [200, snapshot(me)];
   }
   if (p === '/api/profile' && m === 'PUT') { me.profile = cleanProfile(body, vipOn(me)); touch(); return [200, snapshot(me)]; }
   if (p.startsWith('/api/profile/') && m === 'GET') {
@@ -777,6 +892,8 @@ const server = http.createServer((req, res) => {
   const n = (hits.get(ip) || 0) + 1; hits.set(ip, n);
   const send = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
   if (n > 300) return send(429, { error: 'rate_limited' });
+  if (req.method === 'POST' && req.url.startsWith('/api/file/up')) return void ready.then(() => fileUpload(req, res, send));
+  if (req.method === 'GET' && req.url.startsWith('/api/file/get')) return void ready.then(() => fileDownload(req, res, send));
   let size = 0; const chunks = [];
   req.on('data', (c) => { size += c.length; if (size > 400_000) { send(413, { error: 'too_large' }); req.destroy(); } else chunks.push(c); });
   req.on('end', () => {
