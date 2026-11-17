@@ -12,3 +12,9 @@ CÁCH LÀM (từng bước):
 LƯU Ý:
 - Ảnh/file được lưu trên ổ đĩa của server (tự xóa sau 30 ngày). Host miễn phí như Render có thể xóa ổ đĩa mỗi lần khởi động lại, ảnh cũ sẽ mất (tin nhắn chữ thì vẫn còn).
 - Giới hạn: mỗi file tối đa 100 MB, mỗi người 2 GB, tổng 8 GB (chỉnh bằng biến FILE_USER_GB, FILES_TOTAL_GB, FILE_TTL_DAYS).
+
+--- BETA: mở Premium cho mọi người ---
+Server mới mặc định cho MỌI người dùng các tính năng Premium (khung và hiệu ứng hồ sơ, gửi cape tự chọn).
+Khi ra bản chính thức, muốn khóa lại: vào Render > Glory-Server > Environment > Add Environment Variable:
+  Key: BETA_ALL_PREMIUM     Value: 0
+rồi Save (server tự khởi động lại). Không cần sửa code.

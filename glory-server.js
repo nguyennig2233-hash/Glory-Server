@@ -113,6 +113,9 @@ let verifyMc = async (token) => {
 const num = (v, max) => (Number.isFinite(+v) && +v > 0 ? Math.min(Math.floor(+v), max) : 0);
 const cleanStats = (q) => (q && typeof q === 'object' ? { blocksMined: num(q.blocksMined, 1e10), distanceBlocks: num(q.distanceBlocks, 1e9), kills: num(q.kills, 1e9), playerKills: num(q.playerKills, 1e9), deaths: num(q.deaths, 1e9), playMinutes: num(q.playMinutes, 1e8) } : null);
 const vipOn = (u) => !!(u.plan && (!u.plan.until || u.plan.until > Date.now()));
+// BETA: ai cũng dùng được tính năng Premium. Khi ra bản chính thức, vào Render > Environment, thêm biến BETA_ALL_PREMIUM = 0 để khóa lại (không cần sửa code).
+const BETA_ALL_PREMIUM = process.env.BETA_ALL_PREMIUM !== '0';
+const canPremium = (u) => BETA_ALL_PREMIUM || vipOn(u);
 const OWNER_NAME = (process.env.OWNER_NAME || 'Devan_De_Glory').toLowerCase();   // chủ dự án: chỉ tài khoản ĐÃ XÁC MINH mang tên này mới có huy hiệu Owner
 const isOwner = (u) => !!(u && u.gSub && String(u.name || '').toLowerCase() === OWNER_NAME);
 // Title do chủ dự án (Dev Tab) đặt và tặng: db.titles xếp theo quyền lực (đầu mảng = cao nhất); người dùng chỉ hiện title cao nhất đang có
@@ -598,7 +601,7 @@ function route(req, body, ip) {
     return [404, { error: 'not_found' }];
   }
   if (p === '/api/cape/set' && m === 'POST') {            // cape tự chọn của Premium: lưu lên máy chủ để nhân viên duyệt
-    if (!vipOn(me)) return [403, { error: 'need_premium' }];
+    if (!canPremium(me)) return [403, { error: 'need_premium' }];
     if (me.capeBan) return [403, { error: 'cape_banned' }];
     const img = String(body.img || ''); if (!CAPE_RE.test(img) || Buffer.from(img.slice(22, 60), 'base64').subarray(0, 4).toString('hex') !== '89504e47') return [400, { error: 'bad_img' }];
     me.cape = { img, at: Date.now() }; touch(); return [200, { ok: true }];
@@ -880,7 +883,7 @@ function route(req, body, ip) {
     me.labels = out; for (const cm of Object.values(me.cm || {})) if (cm.lb && !out.some((l) => l.id === cm.lb)) delete cm.lb;
     touch(); return [200, snapshot(me)];
   }
-  if (p === '/api/profile' && m === 'PUT') { me.profile = cleanProfile(body, vipOn(me)); touch(); return [200, snapshot(me)]; }
+  if (p === '/api/profile' && m === 'PUT') { me.profile = cleanProfile(body, canPremium(me)); touch(); return [200, snapshot(me)]; }
   if (p.startsWith('/api/profile/') && m === 'GET') {
     const u = db.users[p.slice(13)]; if (!u) return [404, { error: 'not_found' }];
     return [200, { ...brief(u), isFriend: rel(me.id).friends.includes(u.id) }];
