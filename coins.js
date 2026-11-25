@@ -10,6 +10,7 @@ const PLAY_CAP_DAY = 30;                                             // tối đ
 const MAX_STEP = 90_000;                                             // mỗi lần đồng bộ chỉ tính tối đa 90 giây (chống gửi trạng thái "playing" giả dài)
 const DAILY_BASE = 10, DAILY_STEP = 2, DAILY_MAX_STREAK = 10;        // thưởng ngày: 10 + 2 × chuỗi (tối đa 30)
 const MAX_BAL = 1_000_000;
+const weekOf = (t) => Math.floor((dayOf(t) + 3) / 7);              // tuần bắt đầu thứ Hai (giờ VN)
 
 // Danh mục cosmetic (máy chủ giữ giá và loại; tên hiển thị do client dịch). badge = biểu tượng cạnh tên, color = màu tên, frame = viền thẻ hồ sơ.
 const ITEMS = [
@@ -44,6 +45,7 @@ function tickPlay(u, playing, now) {
   if (!playing || !last) return 0;
   const d = dayOf(now); if (c.playDay !== d) { c.playDay = d; c.playToday = 0; }
   c.playAcc = (c.playAcc || 0) + Math.max(0, Math.min(now - last, MAX_STEP));
+  { const st = Math.max(0, Math.min(now - last, MAX_STEP)), pm = (c.pm ||= { d: 0, w: 0, day: 0, week: 0, total: 0 }); if (pm.d !== d) { pm.d = d; pm.day = 0; } if (pm.w !== weekOf(now)) { pm.w = weekOf(now); pm.week = 0; } pm.day += st; pm.week += st; pm.total += st; }   // phút chơi cho nhiệm vụ
   let got = 0;
   while (c.playAcc >= PLAY_MS_PER_COIN && c.playToday < PLAY_CAP_DAY) { c.playAcc -= PLAY_MS_PER_COIN; c.playToday++; got += add(u, 1, 'play', '', now); }
   if (c.playToday >= PLAY_CAP_DAY) c.playAcc = Math.min(c.playAcc, PLAY_MS_PER_COIN - 1);

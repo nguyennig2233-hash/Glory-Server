@@ -66,19 +66,16 @@ const D2R = Math.PI / 180;
   // Đọc file Blockbench (đã JSON.parse): trả về { model, tex } hoặc { error }
   function fromBB(bb) {
     if (!bb || typeof bb !== 'object' || !Array.isArray(bb.elements)) return { error: 'cm_bb' };
-    const texs = Array.isArray(bb.textures) ? bb.textures : [];
-    const cnt = new Map(); for (const e of bb.elements) if (e && e.type === 'cube' && e.export !== false && e.faces) for (const n of FACES) { const f = e.faces[n]; if (f && Number.isInteger(f.texture)) cnt.set(f.texture, (cnt.get(f.texture) || 0) + 1); }
-    let ti = 0, best = -1; for (const [k, v] of cnt) if (v > best && texs[k]) { best = v; ti = k; }   // texture mà các mặt thật sự dùng (không phải lúc nào cũng là cái đầu tiên)
-    const tx = texs[ti]; if (!tx || typeof tx.source !== 'string') return { error: 'cm_notex' };
-    const t = cleanTex(tx.source); if (t.error) return t;
-    const res = bb.resolution || {}, sw = +res.width || +tx.uv_width || t.w, sh = +res.height || +tx.uv_height || t.h, kx = t.w / sw, ky = t.h / sh, els = [];   // UV tính theo độ phân giải dự án, đổi sang pixel của ảnh
+    const tx = Array.isArray(bb.textures) ? bb.textures[0] : null; if (!tx || typeof tx.source !== 'string') return { error: 'cm_notex' };
+    const res = bb.resolution || {}, w = +tx.uv_width || +res.width || 64, h = +tx.uv_height || +res.height || 64, els = [];
     for (const e of bb.elements) {
       if (!e || e.type !== 'cube' || e.export === false) continue;
-      const fc = {}; for (const n of FACES) { const q = e.faces && e.faces[n]; if (q && Array.isArray(q.uv) && (!cnt.size || q.texture === ti)) fc[n] = [r3(q.uv[0] * kx), r3(q.uv[1] * ky), r3(q.uv[2] * kx), r3(q.uv[3] * ky), q.rotation || 0]; }
+      const fc = {}; for (const n of FACES) { const q = e.faces && e.faces[n]; if (q && Array.isArray(q.uv)) fc[n] = [...q.uv.slice(0, 4), q.rotation || 0]; }
       let r = [0, 0, 0]; if (Array.isArray(e.rotation) && e.rotation.length === 3) r = e.rotation; else if (e.rotation && e.rotation.angle) { const a = e.rotation.angle, ax = e.rotation.axis; r = ax === 'x' ? [a, 0, 0] : ax === 'y' ? [0, a, 0] : [0, 0, a]; }
       els.push({ f: e.from, t: e.to, o: e.origin, r, fc });
     }
-    const c = clean({ w: t.w, h: t.h, els }); if (c.error) return c;
+    const c = clean({ w, h, els }); if (c.error) return c;
+    const t = cleanTex(tx.source); if (t.error) return t;
     return { model: c.model, tex: t.tex };
   }
   const api = { FACES, SLOTS, LIM, clean, cleanTex, fromBB, xform, rot };

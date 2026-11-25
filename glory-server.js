@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Coins = require('./coins.js');
+const Shards = require('./shards.js'), Eco = require('./economy.js');
 const Cosm = require('./cosmetics.js');
 
 process.on('uncaughtException', (e) => console.error('uncaught', e)); process.on('unhandledRejection', (e) => console.error('unhandled', e));
@@ -19,7 +20,7 @@ const NAME_RE = /^[A-Za-z0-9_]{3,16}$/;
 
 let db = { users: {}, rel: {}, keys: {} };
 try { db = JSON.parse(fs.readFileSync(FILE, 'utf8')); } catch {}
-db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false }; db.capes ||= {}; db.cosm ||= {};
+db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false }; db.capes ||= {}; db.cosm ||= {}; db.scode ||= {}; db.econ ||= { fees: 0, cut: 0, sales: 0, n: 0 };
 let dirty = false;
 const touch = () => { dirty = true; };
 
@@ -37,7 +38,7 @@ async function upPipe(cmds) {
 async function loadRemote() {
   const [meta, ids] = await upPipe([['GET', 'glory:meta'], ['SMEMBERS', 'glory:ids']]);
   const m = meta ? JSON.parse(meta) : {};
-  db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [], news: m.news || null, audit: m.audit || [], maint: m.maint || { on: false } }; savedRemote.set('glory:meta', meta || '');
+  db = { users: {}, rel: m.rel || {}, keys: m.keys || {}, titles: m.titles || [], news: m.news || null, audit: m.audit || [], maint: m.maint || { on: false }, scode: m.scode || {}, econ: m.econ || { fees: 0, cut: 0, sales: 0, n: 0 } }; savedRemote.set('glory:meta', meta || '');
   db.capes = {}; db.cosm = {}; db.files = {};
   const kids = (await upPipe([['SMEMBERS', 'glory:kids']]))[0] || [];
   for (let i = 0; i < kids.length; i += 20) {
@@ -53,13 +54,13 @@ async function loadRemote() {
     const part = ids.slice(i, i + 100), vals = (await upPipe([['MGET', ...part.map((x) => 'glory:u:' + x)]]))[0];
     part.forEach((id, k) => { if (vals[k]) { try { db.users[id] = JSON.parse(vals[k]); savedRemote.set('glory:u:' + id, vals[k]); } catch {} } });
   }
-  db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false }; db.capes ||= {}; db.cosm ||= {}; db.files ||= {};
+  db.keys ||= {}; db.titles ||= []; db.news ||= null; db.audit ||= []; db.maint ||= { on: false }; db.capes ||= {}; db.cosm ||= {}; db.files ||= {}; db.scode ||= {}; db.econ ||= { fees: 0, cut: 0, sales: 0, n: 0 };
 }
 async function flushRemote() {
   const batches = [[]]; let cur = 0;
   const add = (c) => { const n = JSON.stringify(c).length; if (cur + n > 700_000 && batches[batches.length - 1].length) { batches.push([]); cur = 0; } batches[batches.length - 1].push(c); cur += n; };
   const sets = new Map(), dels = [];                                  // ghi lại đúng bản đã gửi, thay đổi xảy ra giữa chừng sẽ được gửi ở lượt sau
-  const meta = JSON.stringify({ rel: db.rel, keys: db.keys, titles: db.titles, news: db.news, audit: db.audit, maint: db.maint });
+  const meta = JSON.stringify({ rel: db.rel, keys: db.keys, titles: db.titles, news: db.news, audit: db.audit, maint: db.maint, scode: db.scode, econ: db.econ });
   if (savedRemote.get('glory:meta') !== meta) { add(['SET', 'glory:meta', meta]); sets.set('glory:meta', meta); }
   const live = new Set();
   for (const [id, u] of Object.entries(db.users)) {
@@ -130,6 +131,8 @@ const broadcast = (fromId, kind, data) => { const ids = onlineIds(); for (const 
 const CAPE_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,250000}$/;
 const TITLE_IMG_RE = /^data:image\/png;base64,[A-Za-z0-9+/=]{20,16000}$/;
 const brief = (u) => ({ id: u.id, name: u.name, owner: isOwner(u), staff: !isOwner(u) && lvlOf(u) ? (lvlOf(u) >= 2 ? 'admin' : 'mod') : null, title: topTitle(u), profile: u.profile || {}, premium: !!u.mcUuid, vip: vipOn(u), since: u.created || 0, stats: u.stats || null, cos: Coins.look(u), kc: Cosm.worn(db, u), sk: u.skin ? u.skin.h : 0 });
+const SHARD_RE = /^GSH-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+const newShardCode = () => { const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789', g = () => Array.from({ length: 4 }, () => A[crypto.randomInt(A.length)]).join(''); return `GSH-${g()}-${g()}-${g()}`; };
 const newKey = () => { const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'; let b = ''; for (let i = 0; i < 10; i++) b += A[crypto.randomInt(A.length)]; return `GLR_${b}@${String(crypto.randomInt(1000)).padStart(3, '0')}`; };
 const tries = new Map();   // userId -> [thời điểm thử sai]
 function presenceFor(viewerId, id) {
@@ -205,7 +208,7 @@ function snapshot(me) {
   if (!me.fid) { me.fid = newFid(); touch(); }
   const r = rel(me.id), U = (id) => db.users[id];
   return {
-    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), capeBan: !!me.capeBan, fid: me.fid, labels: me.labels || [], coin: verified(me) ? Coins.view(me, Date.now()) : null, plan: vipOn(me) ? { until: me.plan.until || null } : null },
+    me: { ...brief(me), dev: lvlOf(me) > 0, lvl: lvlOf(me), capeBan: !!me.capeBan, fid: me.fid, labels: me.labels || [], coin: verified(me) ? Coins.view(me, Date.now()) : null, shard: verified(me) ? Shards.view(me) : null, plan: vipOn(me) ? { until: me.plan.until || null } : null },
     friends: r.friends.map(U).filter(Boolean).map((u) => ({ ...brief(u), presence: presenceFor(me.id, u.id), unread: unreadOf(me, u.id), last: lastOf(me, u.id), cm: (me.cm && me.cm[u.id]) || null })),
     incoming: r.in.map(U).filter(Boolean).map(brief),
     outgoing: r.out.map(U).filter(Boolean).map(brief),
@@ -333,7 +336,7 @@ async function verifyGoogle(idToken) {
 }
 const verified = (u) => !!(u && (u.mcUuid || u.gSub));                // chỉ tài khoản Microsoft hoặc Google mới dùng được bạn bè / chat / gọi
 const RENAME_MS = 7 * 86_400_000;
-const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p.startsWith('/api/chat/') || p.startsWith('/api/file/') || p.startsWith('/api/skin/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search' || p.startsWith('/api/coin') || p.startsWith('/api/shop') || p.startsWith('/api/cosm');
+const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p.startsWith('/api/chat/') || p.startsWith('/api/file/') || p.startsWith('/api/skin/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search' || p.startsWith('/api/coin') || p.startsWith('/api/shop') || p.startsWith('/api/cosm') || p.startsWith('/api/shard') || p === '/api/economy' || p.startsWith('/api/quest') || p.startsWith('/api/staff/');
 
 function route(req, body, ip) {
   const url = new URL(req.url, 'http://x'), p = url.pathname, m = req.method;
@@ -406,7 +409,7 @@ function route(req, body, ip) {
   if (GATED(p) && !verified(me)) return [403, { error: 'need_login' }];
   if (p.startsWith('/api/dev/') && m === 'POST') {            // Dev Tab: chỉ tài khoản Google của chủ dự án
     const op = p.slice(9), T = db.titles, L = lvlOf(me);
-    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, coins: 3, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3, online: 1, health: 1, audit: 2, broadcast: 2, maint: 3, keydel: 3, capes: 2, capedel: 2, capeunban: 2, cosmq: 2, cosmrev: 2, cosmdel: 2 };
+    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, coins: 3, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3, online: 1, health: 1, audit: 2, broadcast: 2, maint: 3, keydel: 3, capes: 2, capedel: 2, capeunban: 2, cosmq: 2, cosmrev: 2, cosmdel: 2, shards: 3, shardcode: 3, shardstats: 3, shardrevoke: 3 };
     if (!(op in NEED)) return [404, { error: 'not_found' }];
     if (L < NEED[op]) return [403, { error: 'not_owner' }];
     const usersOf = (q) => Object.values(db.users).filter((u) => !q || u.name.toLowerCase().includes(q)).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 30)
@@ -441,17 +444,39 @@ function route(req, body, ip) {
     }
     if (op === 'cosmq') return [200, { items: Cosm.queue(db) }];
     if (op === 'cosmrev') {
-      const ok = body.ok !== false, r = Cosm.review(db, String(body.id || ''), ok, body.why); if (r.error) return [404, { error: r.error }];
-      audit(me, ok ? 'cosm.approve' : 'cosm.reject', `${r.name} · ${r.by}${ok ? '' : ' · ' + String(body.why || '').slice(0, 60)}`); touch(); return [200, { ok: true, items: Cosm.queue(db) }];
+      const ok = body.ok !== false, it0 = db.cosm[String(body.id || '')], r = Cosm.review(db, String(body.id || ''), ok, body.why, Date.now()); if (r.error) return [404, { error: r.error }];
+      const wage = Eco.reviewReward(db, me, it0, Date.now());
+      audit(me, ok ? 'cosm.approve' : 'cosm.reject', `${r.name} · ${r.by}${ok ? '' : ' · ' + String(body.why || '').slice(0, 60)}`); touch(); return [200, { ok: true, items: Cosm.queue(db), wage, shard: Shards.view(me) }];
     }
     if (op === 'cosmdel') {
-      const r = Cosm.remove(db, me, String(body.id || ''), true); if (r.error) return [404, { error: r.error }];
+      const r = Cosm.remove(db, me, String(body.id || ''), true, Date.now()); if (r.error) return [404, { error: r.error }];
       audit(me, 'cosm.remove', `${r.name} · ${r.by}`); touch(); return [200, { ok: true, items: Cosm.queue(db) }];
     }
     if (op === 'coins') {
       const u = byName(body.name); if (!u || !verified(u)) return [404, { error: 'user_not_found' }];
       const a = Coins.grant(u, body.amount, Date.now(), String(body.note || '').slice(0, 30)); if (!a) return [400, { error: 'bad_amount' }];
       audit(me, 'coin.grant', `${a > 0 ? '+' : ''}${a} → ${u.name}`); touch(); return [200, { ok: true, bal: Coins.view(u, Date.now()).bal }];
+    }
+    if (op === 'shards') {                                      // tặng / thu Glory Shard (có nhật ký)
+      const u = byName(body.name); if (!u || !verified(u)) return [404, { error: 'user_not_found' }];
+      const amt = Math.max(-1_000_000, Math.min(1_000_000, Math.floor(+body.amount || 0))), a = Shards.add(u, amt, 'grant', String(body.note || '').slice(0, 30), Date.now()); if (!a) return [400, { error: 'bad_amount' }];
+      audit(me, 'shard.grant', `${a > 0 ? '+' : ''}${a} → ${u.name}`); touch(); return [200, { ok: true, bal: Shards.view(u).bal }];
+    }
+    if (op === 'shardstats') {                                  // thống kê kinh tế Shard + danh sách mã chưa dùng
+      let circ = 0, holders = 0; for (const u of Object.values(db.users)) { const b = u.shard && u.shard.bal | 0; if (b > 0) { circ += b; holders++; } }
+      const all = Object.values(db.scode), unused = all.filter((c) => !c.used), usedL = all.filter((c) => c.used);
+      const e = db.econ || { fees: 0, cut: 0, sales: 0, n: 0 };
+      return [200, { circ, holders, codes: { total: all.length, used: usedL.length, unused: unused.length, unusedValue: unused.reduce((a, c) => a + c.value, 0), usedValue: usedL.reduce((a, c) => a + c.value, 0) },
+        econ: { fees: e.fees, cut: e.cut, sales: e.sales, n: e.n, minted: e.minted || 0 }, list: unused.sort((a, b) => b.created - a.created).slice(0, 50).map((c) => ({ id: c.id, value: c.value, created: c.created, note: c.note || '' })) }];
+    }
+    if (op === 'shardrevoke') {                                 // thu hồi 1 mã chưa dùng
+      const h = Object.keys(db.scode).find((k) => db.scode[k].id === String(body.id || '') && !db.scode[k].used); if (!h) return [404, { error: 'no_code' }];
+      audit(me, 'shardcode.revoke', `${db.scode[h].value}${db.scode[h].note ? ' · ' + db.scode[h].note : ''}`); delete db.scode[h]; touch(); return [200, { ok: true }];
+    }
+    if (op === 'shardcode') {                                   // tạo mã nạp Glory Shard (mã thật chỉ hiện một lần, server chỉ giữ bản băm)
+      const count = Math.max(1, Math.min(100, body.count | 0 || 1)), value = Math.max(1, Math.min(100000, body.value | 0)), note = String(body.note || '').replace(/\s+/g, ' ').trim().slice(0, 40), codes = [];
+      while (codes.length < count) { const k = newShardCode(), h = sha(k); if (db.scode[h]) continue; db.scode[h] = { id: crypto.randomBytes(4).toString('hex'), value, created: Date.now(), used: null, note }; codes.push(k); }
+      audit(me, 'shardcode.create', `${count} × ${value}${note ? ' · ' + note : ''}`); touch(); return [200, { codes, value }];
     }
     if (op === 'grant') {
       const t = T.find((x) => x.id === body.title), u = byName(body.name);
@@ -581,6 +606,19 @@ function route(req, body, ip) {
     return [200, { ...snapshot(me), plan: me.plan }];
   }
   if (p === '/api/coin/daily' && m === 'POST') { const r = Coins.claimDaily(me, Date.now()); if (!r.ok) return [409, { error: r.error }]; touch(); return [200, { ...r, coin: Coins.view(me, Date.now()) }]; }
+  if (p === '/api/economy' && m === 'GET') { const now = Date.now(), lv = lvlOf(me); return [200, { rules: Eco.RULES, quests: Eco.state(me, db, now), staff: lv > 0 ? Eco.staffView(me, lv, now) : null, coin: Coins.view(me, now), shard: Shards.view(me) }]; }
+  if (p === '/api/quest/claim' && m === 'POST') { const now = Date.now(), r = Eco.claim(me, db, String(body.id || ''), now); if (!r.ok) return [r.error === 'no_quest' ? 404 : 409, { error: r.error }]; touch(); return [200, { ...r, coin: Coins.view(me, now), quests: Eco.state(me, db, now) }]; }
+  if (p === '/api/staff/stipend' && m === 'POST') { const now = Date.now(), lv = lvlOf(me); if (lv < 1) return [403, { error: 'forbidden' }]; const r = Eco.stipend(db, me, lv, now); if (!r.ok) return [409, { error: r.error }]; touch(); return [200, { ...r, shard: Shards.view(me), staff: Eco.staffView(me, lv, now) }]; }
+  if (p === '/api/shard' && m === 'GET') return [200, { shard: Shards.view(me) }];
+  if (p === '/api/shard/redeem' && m === 'POST') {            // nạp Glory Shard bằng mã
+    const now = Date.now(), recent = (tries.get('s' + me.id) || []).filter((t) => now - t < 600_000);
+    if (recent.length >= 5) return [429, { error: 'too_many' }];
+    const code = String(body.code || '').trim().toUpperCase(), rec = SHARD_RE.test(code) ? db.scode[sha(code)] : null;
+    if (!rec) { recent.push(now); tries.set('s' + me.id, recent); return [404, { error: 'bad_code' }]; }
+    if (rec.used) return [409, { error: 'code_used' }];
+    rec.used = { by: me.id, at: now }; Shards.add(me, rec.value, 'topup', '', now); touch();
+    return [200, { ok: true, amount: rec.value, shard: Shards.view(me) }];
+  }
   if (p === '/api/shop' && m === 'GET') return [200, { items: Coins.catalog(), coin: Coins.view(me, Date.now()) }];
   if (p === '/api/shop/buy' && m === 'POST') {
     const now = Date.now(), recent = (actTimes.get(me.id) || []).filter((x) => now - x < 10_000); if (recent.length >= 20) return [429, { error: 'slow_down' }]; recent.push(now); actTimes.set(me.id, recent);
@@ -588,16 +626,16 @@ function route(req, body, ip) {
   }
   if (p === '/api/shop/equip' && m === 'POST') { const r = Coins.equip(me, String(body.slot || ''), String(body.item || '')); if (!r.ok) return [400, { error: r.error }]; touch(); return [200, { ok: true, coin: Coins.view(me, Date.now()) }]; }
   if (p.startsWith('/api/cosm')) {                          // chợ cosmetic 3D
-    const now = Date.now(), sp = url.searchParams, fail = (r) => [r.error === 'forbidden' ? 403 : r.error === 'cm_gone' ? 404 : r.error === 'cm_poor' || r.error === 'cm_owned' || r.error === 'cm_limit' || r.error === 'cm_pending' || r.error === 'cm_fast' || r.error === 'cm_dupname' ? 409 : 400, { error: r.error }];
-    if (p === '/api/cosm' && m === 'GET') return [200, { ...Cosm.list(db, me, { slot: sp.get('slot'), q: sp.get('q'), sort: sp.get('sort'), offset: sp.get('offset') }), min: Cosm.MIN_PRICE, max: Cosm.MAX_PRICE, cut: Cosm.CUT }];
+    const now = Date.now(), sp = url.searchParams, fail = (r) => [r.error === 'forbidden' ? 403 : r.error === 'cm_gone' ? 404 : r.error === 'cm_poor' || r.error === 'cm_nofee' || r.error === 'cm_owned' || r.error === 'cm_limit' || r.error === 'cm_pending' || r.error === 'cm_fast' || r.error === 'cm_dupname' ? 409 : 400, { error: r.error }];
+    if (p === '/api/cosm' && m === 'GET') return [200, { ...Cosm.list(db, me, { slot: sp.get('slot'), q: sp.get('q'), sort: sp.get('sort'), kind: sp.get('kind'), offset: sp.get('offset') }), min: Cosm.MIN_PRICE, max: Cosm.MAX_PRICE, cut: Cosm.CUT, fee: Cosm.FEE }];
     if (p === '/api/cosm/mine' && m === 'GET') return [200, Cosm.mine(db, me)];
     if (p === '/api/cosm/item' && m === 'GET') { const it = Cosm.item(db, me, String(sp.get('id') || ''), lvlOf(me) >= 1); return it ? [200, it] : [404, { error: 'cm_gone' }]; }
     if (m !== 'POST') return [404, { error: 'not_found' }];
     const recent = (actTimes.get(me.id) || []).filter((x) => now - x < 10_000); if (recent.length >= 20) return [429, { error: 'slow_down' }]; recent.push(now); actTimes.set(me.id, recent);
-    if (p === '/api/cosm/upload') { const r = Cosm.upload(db, me, body, now); if (r.error) return fail(r); touch(); return [201, r]; }
-    if (p === '/api/cosm/buy') { const r = Cosm.buy(db, me, String(body.id || ''), now); if (r.error) return fail(r); touch(); return [200, { ok: true, coin: Coins.view(me, now), mine: Cosm.mine(db, me) }]; }
+    if (p === '/api/cosm/upload') { const r = Cosm.upload(db, me, body, now); if (r.error) return fail(r); touch(); return [201, { ...r, shard: Shards.view(me) }]; }
+    if (p === '/api/cosm/buy') { const r = Cosm.buy(db, me, String(body.id || ''), now); if (r.error) return fail(r); touch(); return [200, { ok: true, shard: Shards.view(me), mine: Cosm.mine(db, me) }]; }
     if (p === '/api/cosm/equip') { const r = Cosm.equip(db, me, String(body.slot || ''), String(body.id || '')); if (r.error) return fail(r); touch(); return [200, { ok: true, equip: Cosm.mine(db, me).equip }]; }
-    if (p === '/api/cosm/delete') { const r = Cosm.remove(db, me, String(body.id || ''), false); if (r.error) return fail(r); touch(); return [200, r]; }
+    if (p === '/api/cosm/delete') { const r = Cosm.remove(db, me, String(body.id || ''), false, now); if (r.error) return fail(r); touch(); return [200, { ...r, shard: Shards.view(me) }]; }
     return [404, { error: 'not_found' }];
   }
   if (p === '/api/cape/set' && m === 'POST') {            // cape tự chọn của Premium: lưu lên máy chủ để nhân viên duyệt
@@ -783,7 +821,7 @@ function route(req, body, ip) {
     const at = nextVer(a, b);
     a.push(att ? { t: at, m: 1, x: text, a: att } : { t: at, m: 1, x: text }); b.push(att ? { t: at, x: text, a: att } : { t: at, x: text });
     for (const [u, c] of [[me, a], [t, b]]) { if (c.length > MSG_PER_CHAT) c.splice(0, c.length - MSG_PER_CHAT); trimChats(u); }
-    (me.readAt ||= {})[t.id] = at;                                   // gửi tin = đã đọc mọi thứ trước đó
+    Eco.onChat(me, now); (me.readAt ||= {})[t.id] = at;                                   // gửi tin = đã đọc mọi thứ trước đó
     touch(); return [201, { msg: msgOut(a[a.length - 1]) }];
   }
   if (p === '/api/msg/list' && m === 'GET') {

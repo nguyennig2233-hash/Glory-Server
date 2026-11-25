@@ -1,20 +1,31 @@
-CẬP NHẬT SERVER (để gửi ảnh/file trong chat không bị lỗi bad_json)
-
-Bản server đang chạy trên máy chủ của bạn là bản CŨ, chưa có phần gửi file. Launcher gửi ảnh nhưng server không hiểu nên báo "bad_json".
+CẬP NHẬT SERVER – GLORY SHARD (tiền tệ mới) + Cosmetic đăng miễn phí / thu phí
 
 CÁCH LÀM (từng bước):
-1. Mở nơi bạn đang host server (GitHub repo của server, hoặc trang Render/host bạn dùng).
-2. Thay các file cùng tên bằng 3 file trong thư mục này: glory-server.js, coins.js, cosmetics.js
-   (chép đè lên file cũ (CHỈ cần glory-server.js nếu coins.js và cosmetics.js đã có sẵn trên GitHub), giữ nguyên file data.json và package.json của bạn).
-3. Lưu / Commit. Nếu host tự deploy lại thì đợi vài phút; nếu không thì bấm "Deploy" / "Restart".
-4. Mở lại launcher, thử gửi ảnh.
+1. Vào GitHub repo "Glory-Server".
+2. Bấm "Add file" > "Upload files". Kéo thả 5 file: glory-server.js, shards.js, cosmetics.js, coins.js, cosmodel.js
+   (shards.js là file MỚI; 4 file còn lại ghi đè file cũ). Không đụng package.json.
+3. Kéo xuống bấm "Commit changes".
+4. Vào Render > Glory-Server, đợi tự Deploy (hoặc bấm Manual Deploy > Deploy latest commit). Đợi chữ "Live".
 
-LƯU Ý:
-- Ảnh/file được lưu trên ổ đĩa của server (tự xóa sau 30 ngày). Host miễn phí như Render có thể xóa ổ đĩa mỗi lần khởi động lại, ảnh cũ sẽ mất (tin nhắn chữ thì vẫn còn).
-- Giới hạn: mỗi file tối đa 100 MB, mỗi người 2 GB, tổng 8 GB (chỉnh bằng biến FILE_USER_GB, FILES_TOTAL_GB, FILE_TTL_DAYS).
+QUY TẮC:
+- Glory Shard CHỈ nạp được, không rút ra, không đổi ngược thành tiền.
+- Cách nạp: chủ server tạo MÃ NẠP trong launcher: Dev tab > thẻ Shard > ô tạo mã (GSH-XXXX-XXXX-XXXX). Gửi mã cho người mua; họ nhập ở Cosmetic > "Ví Shard". Mỗi mã dùng 1 lần.
+  Cũng có thể cộng/trừ thẳng Shard cho 1 tài khoản trong Dev tab.
+- Đăng cosmetic: (1) Miễn phí: giá 0, không mất phí. (2) Thu phí: tác giả đặt giá 5–5000 Shard, trả phí đăng 10 Shard; mỗi lượt bán tác giả nhận 70%, 30% thuộc hệ thống.
+- Phí đăng 10 Shard được hoàn lại nếu bị từ chối hoặc xóa khi đang chờ duyệt.
+- Món cosmetic cũ từng định giá bằng Coin sẽ thành miễn phí.
+- CHƯA có cổng thanh toán thật. Nếu bán Shard lấy tiền thật, cần tự xem lại quy định pháp lý/thuế.
 
---- BETA: mở Premium cho mọi người ---
-Server mới mặc định cho MỌI người dùng các tính năng Premium (khung và hiệu ứng hồ sơ, gửi cape tự chọn).
-Khi ra bản chính thức, muốn khóa lại: vào Render > Glory-Server > Environment > Add Environment Variable:
-  Key: BETA_ALL_PREMIUM     Value: 0
-rồi Save (server tự khởi động lại). Không cần sửa code.
+--- THÊM (bản hoàn thiện) ---
+- Dev tab > thẻ "Kinh tế Shard": xem Shard đang lưu hành, số mã chưa dùng / đã dùng, doanh số, phần hệ thống thu (30%) và phí đăng giữ lại. Mã chưa dùng có nút "Thu hồi".
+- Mã nạp chỉ hiện đầy đủ lúc tạo (server lưu bản băm). Mất mã thì thu hồi rồi tạo mã mới.
+- Số liệu "phần hệ thống thu" chỉ tính từ lúc cập nhật bản này.
+
+--- MỞ RỘNG KINH TẾ (bản này) ---
+Có thêm file MỚI economy.js: khi tải lên GitHub nhớ kéo cả economy.js. Các file glory-server.js, coins.js, cosmetics.js đã đổi.
+Chạy ổn nhất khi cả 7 file .js cùng được tải lên: glory-server.js, economy.js, shards.js, cosmetics.js, coins.js, cosmodel.js (và không đụng package.json).
+Mọi con số luật nằm ở đầu file economy.js (RULES, DAILY, WEEKLY, MILE). Muốn chỉnh thưởng chỉ sửa ở đó.
+
+Người chơi (Coin): nhiệm vụ ngày (chơi 20 phút +15, nhắn 3 tin +10), nhiệm vụ tuần (chơi 5 giờ +100, nhắn 30 tin +40), cột mốc 1 lần (bạn đầu tiên +20, 10 bạn +60, chơi 5h +50, 50h +300, có món được duyệt +50, có người lấy món +50). Món cosmetic MIỄN PHÍ được 10/50/100 lượt lấy thì tác giả nhận thêm 20/60/150 Coin.
+Staff (Shard do hệ thống phát): duyệt 1 cosmetic (duyệt hoặc từ chối) +2 Shard, tối đa 50 Shard mỗi ngày, không có tiền với món của chính mình; duyệt đủ 3 món trong tuần thì nhận lương tuần: mod 50, admin 100 Shard. Chủ (Owner) không có lương tự động.
+Tuần bắt đầu thứ Hai, ngày tính theo giờ Việt Nam. Tiền phát cho staff được cộng vào số "minted" trong thẻ Kinh tế Shard.
