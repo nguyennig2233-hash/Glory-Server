@@ -38,3 +38,14 @@ Premium key mua trong shop là key thường (GLR_...@...), hiện trong Dev tab
 Title thuê: chặn tên staff (owner, admin, mod, staff, glory...) và từ phản cảm; muốn gỡ: Dev tab > thẻ "Title tùy chỉnh" > gõ tên người chơi > Gỡ title (admin trở lên).
 Coin Boost x2: tốc độ nhận Coin khi chơi và trần Coin mỗi ngày đều nhân đôi.
 Gói Shard chưa tự động: người chơi liên hệ Discord, bạn tạo mã GSH trong Dev tab rồi gửi, họ nhập ở trang Nhiệm vụ.
+
+--- GIÁ PREMIUM THEO BẢNG GIÁ DISCORD (bản mới nhất, thay cho giá ở mục SHOP MỚI) ---
+Quy ước: 1 Glory Shard = 0,01 USD. Premium key: 7 ngày 70 Shard ($0.70), 1 tháng 299 ($2.99), 3 tháng 799 ($7.99), 1 năm 3199 ($31.99), Vĩnh viễn 5999 ($59.99).
+Gói Shard bán ở kênh #glory-shard: 100 ($1), 500+50 ($5), 1000+150 ($10), 3000+600 ($30). Số bonus là mình đặt tạm, chỉnh trong shop.js (PACKS) cho khớp kênh #glory-shard.
+Title thuê và Coin Boost giữ giá cũ (60/200 và 50/150 Shard); chỉnh trong CATALOG nếu muốn.
+Chỉ cần tải lại shop.js lên GitHub Glory-Server (các file khác không đổi) rồi Deploy.
+
+--- Title tùy chỉnh nâng cao (shop.js + glory-server.js) ---
+- Người thuê title có thể chọn: màu tùy ý (#rrggbb), gradient 2–3 màu + góc, cầu vồng, glow/neon, hiệu ứng (ánh lướt, màu chảy, nhịp đập, chớp), khung, kiểu chữ, đậm/nghiêng, icon (12 icon vẽ), ảnh PNG nhỏ (≤64x64, ≤12KB).
+- Server tự làm sạch mọi giá trị (chỉ nhận trong danh sách cho phép, ảnh phải là PNG thật); dữ liệu lưu ở me.ctitle.fx / me.ctitle.img.
+- Gỡ title vi phạm vẫn dùng dev op "ctitle" (xóa cả kiểu và ảnh).
