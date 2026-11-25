@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const Coins = require('./coins.js');
-const Shards = require('./shards.js'), Eco = require('./economy.js');
+const Shards = require('./shards.js'), Eco = require('./economy.js'), Shop = require('./shop.js');
 const Cosm = require('./cosmetics.js');
 
 process.on('uncaughtException', (e) => console.error('uncaught', e)); process.on('unhandledRejection', (e) => console.error('unhandled', e));
@@ -120,7 +120,7 @@ const canPremium = (u) => BETA_ALL_PREMIUM || vipOn(u);
 const OWNER_NAME = (process.env.OWNER_NAME || 'Devan_De_Glory').toLowerCase();   // chủ dự án: chỉ tài khoản ĐÃ XÁC MINH mang tên này mới có huy hiệu Owner
 const isOwner = (u) => !!(u && u.gSub && String(u.name || '').toLowerCase() === OWNER_NAME);
 // Title do chủ dự án (Dev Tab) đặt và tặng: db.titles xếp theo quyền lực (đầu mảng = cao nhất); người dùng chỉ hiện title cao nhất đang có
-const topTitle = (u) => { const own = Array.isArray(u.titles) ? u.titles : []; const t = db.titles.find((x) => own.includes(x.id)); return t ? { id: t.id, name: t.name, color: t.color, img: t.img || '' } : null; };
+const topTitle = (u) => { const own = Array.isArray(u.titles) ? u.titles : []; const t = db.titles.find((x) => own.includes(x.id)); return t ? { id: t.id, name: t.name, color: t.color, img: t.img || '' } : Shop.titleOf(u, Date.now()); };   // title tùy chỉnh đang thuê chỉ hiện khi không có title của dự án
 // Cấp quyền: 3 = Owner (Google, đúng tên chủ), 2 = Admin, 1 = Mod (do Owner phân trong Dev Tab); chỉ tài khoản đã xác minh mới có quyền
 const PERM_LVL = { mod: 1, admin: 2 };
 const titleLvl = (u) => (Array.isArray(u.titles) ? Math.max(0, ...db.titles.filter((t) => u.titles.includes(t.id)).map((t) => PERM_LVL[t.perm] || 0)) : 0);   // title có quyền (Mod / Admin) cũng mở Dev Tab
@@ -336,7 +336,7 @@ async function verifyGoogle(idToken) {
 }
 const verified = (u) => !!(u && (u.mcUuid || u.gSub));                // chỉ tài khoản Microsoft hoặc Google mới dùng được bạn bè / chat / gọi
 const RENAME_MS = 7 * 86_400_000;
-const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p.startsWith('/api/chat/') || p.startsWith('/api/file/') || p.startsWith('/api/skin/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search' || p.startsWith('/api/coin') || p.startsWith('/api/shop') || p.startsWith('/api/cosm') || p.startsWith('/api/shard') || p === '/api/economy' || p.startsWith('/api/quest') || p.startsWith('/api/staff/');
+const GATED = (p) => p.startsWith('/api/friends/') || p.startsWith('/api/msg/') || p.startsWith('/api/chat/') || p.startsWith('/api/file/') || p.startsWith('/api/skin/') || p === '/api/call/signal' || p === '/api/call/poll' || p.startsWith('/api/room/') || p === '/api/search' || p.startsWith('/api/coin') || p.startsWith('/api/gshop') || p.startsWith('/api/cosm') || p.startsWith('/api/shard') || p === '/api/economy' || p.startsWith('/api/gshop') || p.startsWith('/api/quest') || p.startsWith('/api/staff/');
 
 function route(req, body, ip) {
   const url = new URL(req.url, 'http://x'), p = url.pathname, m = req.method;
@@ -409,7 +409,7 @@ function route(req, body, ip) {
   if (GATED(p) && !verified(me)) return [403, { error: 'need_login' }];
   if (p.startsWith('/api/dev/') && m === 'POST') {            // Dev Tab: chỉ tài khoản Google của chủ dự án
     const op = p.slice(9), T = db.titles, L = lvlOf(me);
-    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, coins: 3, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3, online: 1, health: 1, audit: 2, broadcast: 2, maint: 3, keydel: 3, capes: 2, capedel: 2, capeunban: 2, cosmq: 2, cosmrev: 2, cosmdel: 2, shards: 3, shardcode: 3, shardstats: 3, shardrevoke: 3 };
+    const NEED = { state: 2, save: 3, delete: 3, order: 3, grant: 2, coins: 3, stats: 2, users: 1, ban: 1, mute: 1, announce: 2, announce_clear: 2, keys: 3, keylist: 3, premium: 3, role: 3, online: 1, health: 1, audit: 2, broadcast: 2, maint: 3, keydel: 3, capes: 2, capedel: 2, capeunban: 2, cosmq: 2, cosmrev: 2, cosmdel: 2, shards: 3, shardcode: 3, shardstats: 3, shardrevoke: 3, ctitle: 2 };
     if (!(op in NEED)) return [404, { error: 'not_found' }];
     if (L < NEED[op]) return [403, { error: 'not_owner' }];
     const usersOf = (q) => Object.values(db.users).filter((u) => !q || u.name.toLowerCase().includes(q)).sort((a, b) => (b.created || 0) - (a.created || 0)).slice(0, 30)
@@ -461,6 +461,10 @@ function route(req, body, ip) {
       const u = byName(body.name); if (!u || !verified(u)) return [404, { error: 'user_not_found' }];
       const amt = Math.max(-1_000_000, Math.min(1_000_000, Math.floor(+body.amount || 0))), a = Shards.add(u, amt, 'grant', String(body.note || '').slice(0, 30), Date.now()); if (!a) return [400, { error: 'bad_amount' }];
       audit(me, 'shard.grant', `${a > 0 ? '+' : ''}${a} → ${u.name}`); touch(); return [200, { ok: true, bal: Shards.view(u).bal }];
+    }
+    if (op === 'ctitle') {                                      // gỡ title tùy chỉnh vi phạm
+      const u = byName(body.name); if (!u || !u.ctitle) return [404, { error: 'user_not_found' }];
+      audit(me, 'ctitle.revoke', `${u.ctitle.text || ''} → ${u.name}`); u.ctitle = null; touch(); return [200, { ok: true }];
     }
     if (op === 'shardstats') {                                  // thống kê kinh tế Shard + danh sách mã chưa dùng
       let circ = 0, holders = 0; for (const u of Object.values(db.users)) { const b = u.shard && u.shard.bal | 0; if (b > 0) { circ += b; holders++; } }
@@ -606,6 +610,12 @@ function route(req, body, ip) {
     return [200, { ...snapshot(me), plan: me.plan }];
   }
   if (p === '/api/coin/daily' && m === 'POST') { const r = Coins.claimDaily(me, Date.now()); if (!r.ok) return [409, { error: r.error }]; touch(); return [200, { ...r, coin: Coins.view(me, Date.now()) }]; }
+  if (p === '/api/gshop' && m === 'GET') return [200, Shop.view(db, me, Date.now())];
+  if (p === '/api/gshop/buy' && m === 'POST') {
+    const now = Date.now(), r = Shop.buy(db, me, String(body.id || ''), now, (days, note) => { let k, h; do { k = newKey(); h = sha(k); } while (db.keys[h]); db.keys[h] = { id: crypto.randomBytes(4).toString('hex'), days, created: now, used: null, hint: k.slice(0, 8) + '…', note }; return k; });
+    if (!r.ok) return [r.error === 'no_item' ? 404 : 409, { error: r.error }]; touch(); return [200, { ...r, shop: Shop.view(db, me, now), shard: Shards.view(me) }];
+  }
+  if (p === '/api/gshop/title' && m === 'POST') { const now = Date.now(), r = Shop.setTitle(me, body.text, String(body.color || ''), now); if (!r.ok) return [r.error === 'no_rental' ? 409 : 400, { error: r.error }]; touch(); return [200, { ok: true, shop: Shop.view(db, me, now) }]; }
   if (p === '/api/economy' && m === 'GET') { const now = Date.now(), lv = lvlOf(me); return [200, { rules: Eco.RULES, quests: Eco.state(me, db, now), staff: lv > 0 ? Eco.staffView(me, lv, now) : null, coin: Coins.view(me, now), shard: Shards.view(me) }]; }
   if (p === '/api/quest/claim' && m === 'POST') { const now = Date.now(), r = Eco.claim(me, db, String(body.id || ''), now); if (!r.ok) return [r.error === 'no_quest' ? 404 : 409, { error: r.error }]; touch(); return [200, { ...r, coin: Coins.view(me, now), quests: Eco.state(me, db, now) }]; }
   if (p === '/api/staff/stipend' && m === 'POST') { const now = Date.now(), lv = lvlOf(me); if (lv < 1) return [403, { error: 'forbidden' }]; const r = Eco.stipend(db, me, lv, now); if (!r.ok) return [409, { error: r.error }]; touch(); return [200, { ...r, shard: Shards.view(me), staff: Eco.staffView(me, lv, now) }]; }

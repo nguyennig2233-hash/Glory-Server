@@ -47,8 +47,9 @@ function tickPlay(u, playing, now) {
   c.playAcc = (c.playAcc || 0) + Math.max(0, Math.min(now - last, MAX_STEP));
   { const st = Math.max(0, Math.min(now - last, MAX_STEP)), pm = (c.pm ||= { d: 0, w: 0, day: 0, week: 0, total: 0 }); if (pm.d !== d) { pm.d = d; pm.day = 0; } if (pm.w !== weekOf(now)) { pm.w = weekOf(now); pm.week = 0; } pm.day += st; pm.week += st; pm.total += st; }   // phút chơi cho nhiệm vụ
   let got = 0;
-  while (c.playAcc >= PLAY_MS_PER_COIN && c.playToday < PLAY_CAP_DAY) { c.playAcc -= PLAY_MS_PER_COIN; c.playToday++; got += add(u, 1, 'play', '', now); }
-  if (c.playToday >= PLAY_CAP_DAY) c.playAcc = Math.min(c.playAcc, PLAY_MS_PER_COIN - 1);
+  const bx = u.boost && u.boost > now ? 2 : 1, per = PLAY_MS_PER_COIN / bx, cap = PLAY_CAP_DAY * bx;   // Coin Boost x2 (mua bằng Shard)
+  while (c.playAcc >= per && c.playToday < cap) { c.playAcc -= per; c.playToday++; got += add(u, 1, 'play', '', now); }
+  if (c.playToday >= cap) c.playAcc = Math.min(c.playAcc, per - 1);
   return got;
 }
 
@@ -88,7 +89,7 @@ function look(u) {
 }
 function view(u, now) {
   const c = ledger(u);
-  return { bal: c.bal, earned: c.earned, spent: c.spent, daily: dailyState(u, now), play: { today: c.playToday && c.playDay === dayOf(now) ? c.playToday : 0, cap: PLAY_CAP_DAY, perCoinMin: PLAY_MS_PER_COIN / 60_000 }, log: c.log.slice(0, 20), owned: owned(u), equip: { ...(u.equip || {}) } };
+  return { bal: c.bal, earned: c.earned, spent: c.spent, daily: dailyState(u, now), play: { today: c.playToday && c.playDay === dayOf(now) ? c.playToday : 0, cap: PLAY_CAP_DAY * (u.boost && u.boost > now ? 2 : 1), perCoinMin: PLAY_MS_PER_COIN / 60_000 / (u.boost && u.boost > now ? 2 : 1), boost: !!(u.boost && u.boost > now) }, log: c.log.slice(0, 20), owned: owned(u), equip: { ...(u.equip || {}) } };
 }
 const catalog = () => ITEMS.map((i) => ({ id: i.id, kind: i.kind, price: i.price, glyph: i.glyph || '', value: i.value || '' }));
 // Chủ dự án tặng / thu coin (có nhật ký)

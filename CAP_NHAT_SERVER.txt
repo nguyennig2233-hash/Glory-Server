@@ -29,3 +29,12 @@ Mọi con số luật nằm ở đầu file economy.js (RULES, DAILY, WEEKLY, MI
 Người chơi (Coin): nhiệm vụ ngày (chơi 20 phút +15, nhắn 3 tin +10), nhiệm vụ tuần (chơi 5 giờ +100, nhắn 30 tin +40), cột mốc 1 lần (bạn đầu tiên +20, 10 bạn +60, chơi 5h +50, 50h +300, có món được duyệt +50, có người lấy món +50). Món cosmetic MIỄN PHÍ được 10/50/100 lượt lấy thì tác giả nhận thêm 20/60/150 Coin.
 Staff (Shard do hệ thống phát): duyệt 1 cosmetic (duyệt hoặc từ chối) +2 Shard, tối đa 50 Shard mỗi ngày, không có tiền với món của chính mình; duyệt đủ 3 món trong tuần thì nhận lương tuần: mod 50, admin 100 Shard. Chủ (Owner) không có lương tự động.
 Tuần bắt đầu thứ Hai, ngày tính theo giờ Việt Nam. Tiền phát cho staff được cộng vào số "minted" trong thẻ Kinh tế Shard.
+
+--- SHOP MỚI (bản này) ---
+Có thêm file MỚI shop.js. Cần tải lên GitHub Glory-Server cả 8 file: glory-server.js, economy.js, shop.js, shards.js, cosmetics.js, coins.js, cosmodel.js (7 file .js; không đụng package.json). Sau đó Render > Deploy.
+Bán bằng Glory Shard: Premium key 7/30/90 ngày (120/400/1000), thuê title tùy chỉnh 7/30 ngày (60/200), Coin Boost x2 7/30 ngày (50/150).
+Chỉnh giá: mở shop.js, sửa CATALOG (giá Shard của món) và PACKS (gói Shard, cột vnd chỉ để hiển thị; mình đặt số tạm, bạn đổi theo bảng giá thật).
+Premium key mua trong shop là key thường (GLR_...@...), hiện trong Dev tab > danh sách key với ghi chú "shop · tên người mua". Người mua dùng ngay hoặc tặng bạn bè.
+Title thuê: chặn tên staff (owner, admin, mod, staff, glory...) và từ phản cảm; muốn gỡ: Dev tab > thẻ "Title tùy chỉnh" > gõ tên người chơi > Gỡ title (admin trở lên).
+Coin Boost x2: tốc độ nhận Coin khi chơi và trần Coin mỗi ngày đều nhân đôi.
+Gói Shard chưa tự động: người chơi liên hệ Discord, bạn tạo mã GSH trong Dev tab rồi gửi, họ nhập ở trang Nhiệm vụ.
