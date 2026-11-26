@@ -9,11 +9,22 @@ const crypto = require('crypto'), Shards = require('./shards.js'), CM = require(
 const MIN_PRICE = 5, MAX_PRICE = 5000, CUT = 0.7, FEE = 10, MAX_UPLOADS = 12, MAX_PENDING = 3, GAP_MS = 30_000, PAGE = 24;
 const NAME_RE = /^[\p{L}\p{N} _'’\-.!]{2,30}$/u;
 
+// Hiệu ứng dấu chân (slot 'foot'): không có mô hình 3D, chỉ có ảnh dấu (PNG ≤ 32x32) + thông số `fp`. Dùng chung chợ / mua / duyệt / đeo với cosmetic 3D.
+const FOOT = 'foot', ALL = [...CM.SLOTS, FOOT];
+const BURSTS = ['none', 'spark', 'smoke', 'flame', 'heart', 'snow', 'bubble', 'note'], FADES = ['none', 'out', 'shrink'], WHENS = ['walk', 'sprint', 'all'], STAMP_MAX = 32;
+function cleanFp(x) {
+  x = x && typeof x === 'object' ? x : {};
+  const num = (v, lo, hi, d) => { v = Number(v); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v * 100) / 100)) : d; };
+  const pick = (v, list, d) => (list.includes(v) ? v : d);
+  return { size: num(x.size, 0.5, 2, 1), gap: num(x.gap, 0.4, 1.6, 0.8), life: num(x.life, 1, 10, 4), op: num(x.op, 0.3, 1, 0.9), fade: pick(x.fade, FADES, 'out'),
+    alt: x.alt !== false, tint: typeof x.tint === 'string' && /^#[0-9a-fA-F]{6}$/.test(x.tint) ? x.tint.toLowerCase() : '', glow: Math.round(num(x.glow, 0, 3, 0)),
+    burst: pick(x.burst, BURSTS, 'none'), when: pick(x.when, WHENS, 'walk') };
+}
 const live = (c) => c && c.status === 'live';
 const owns = (u, id) => Array.isArray(u.kown) && u.kown.includes(id);
 const priceOf = (c) => (c.cur === 'shard' ? Math.max(0, c.price | 0) : 0);
 const meta = (c, me) => ({ id: c.id, name: c.name, desc: c.desc || '', slot: c.slot, price: priceOf(c), free: priceOf(c) === 0, by: c.byName, byId: c.by, at: c.at, sales: c.sales || 0, status: c.status, why: c.why || '',
-  owned: !!me && (owns(me, c.id) || c.by === me.id), mine: !!me && c.by === me.id, els: c.model.els.length });
+  owned: !!me && (owns(me, c.id) || c.by === me.id), mine: !!me && c.by === me.id, els: c.model.els.length, fp: c.fp || null });
 
 function upload(db, me, body, now) {
   const mine = Object.values(db.cosm).filter((c) => c.by === me.id && c.status !== 'removed');
@@ -22,14 +33,16 @@ function upload(db, me, body, now) {
   if (now - (me.kLast || 0) < GAP_MS) return { error: 'cm_fast' };
   const name = String(body.name || '').trim().replace(/\s+/g, ' '); if (!NAME_RE.test(name)) return { error: 'cm_name' };
   const desc = String(body.desc || '').trim().replace(/\s+/g, ' ').slice(0, CM.LIM.desc);
-  const slot = String(body.slot || ''); if (!CM.SLOTS.includes(slot)) return { error: 'cm_slot' };
+  const slot = String(body.slot || ''); if (!ALL.includes(slot)) return { error: 'cm_slot' };
   const paid = body.paid === true;
   let price = 0;
   if (paid) { price = Math.floor(+body.price); if (!(price >= MIN_PRICE)) return { error: 'cm_price_min' }; if (price > MAX_PRICE) return { error: 'cm_price_max' }; }
-  const m = CM.clean(body.model); if (m.error) return m; const t = CM.cleanTex(body.tex); if (t.error) return t;
+  let m, t, fp = null;
+  if (slot === FOOT) { t = CM.cleanTex(body.tex); if (t.error) return t; if (t.w > STAMP_MAX || t.h > STAMP_MAX) return { error: 'cm_fp_dim' }; fp = cleanFp(body.fp); m = { model: { els: [] } }; }
+  else { m = CM.clean(body.model); if (m.error) return m; t = CM.cleanTex(body.tex); if (t.error) return t; }
   const dup = Object.values(db.cosm).find((c) => c.by === me.id && c.status !== 'removed' && c.name.toLowerCase() === name.toLowerCase()); if (dup) return { error: 'cm_dupname' };
   if (paid && Shards.ledger(me).bal < FEE) return { error: 'cm_nofee' };
-  const c = { id: crypto.randomBytes(5).toString('hex'), name, desc, slot, price, cur: 'shard', fee: paid ? FEE : 0, by: me.id, byName: me.name, at: now, status: 'pending', sales: 0, model: { ...m.model, w: t.w, h: t.h }, tex: t.tex };
+  const c = { id: crypto.randomBytes(5).toString('hex'), name, desc, slot, price, cur: 'shard', fee: paid ? FEE : 0, by: me.id, byName: me.name, at: now, status: 'pending', sales: 0, model: { ...m.model, w: t.w, h: t.h }, tex: t.tex, ...(fp ? { fp } : {}) };
   if (paid) { Shards.add(me, -FEE, 'cfee', name, now); eco(db).fees += FEE; }
   db.cosm[c.id] = c; me.kLast = now; return { ok: true, item: meta(c, me), fee: c.fee };
 }
@@ -42,7 +55,7 @@ function refund(db, c, now) {
 
 function list(db, me, q) {
   let all = Object.values(db.cosm).filter(live);
-  if (q.slot && CM.SLOTS.includes(q.slot)) all = all.filter((c) => c.slot === q.slot);
+  if (q.slot && ALL.includes(q.slot)) all = all.filter((c) => c.slot === q.slot); else all = all.filter((c) => c.slot !== FOOT);
   if (q.kind === 'free') all = all.filter((c) => priceOf(c) === 0); else if (q.kind === 'paid') all = all.filter((c) => priceOf(c) > 0);
   const s = String(q.q || '').trim().toLowerCase(); if (s) all = all.filter((c) => c.name.toLowerCase().includes(s) || c.byName.toLowerCase().includes(s));
   const sort = q.sort === 'top' ? (a, b) => b.sales - a.sales || b.at - a.at : q.sort === 'cheap' ? (a, b) => priceOf(a) - priceOf(b) || b.at - a.at : (a, b) => b.at - a.at;
@@ -51,7 +64,10 @@ function list(db, me, q) {
 }
 function mine(db, me) {
   const all = Object.values(db.cosm), eq = me.kequip || {};
-  return { owned: all.filter((c) => (owns(me, c.id) || c.by === me.id) && c.status !== 'removed' || owns(me, c.id)).map((c) => meta(c, me)), uploads: all.filter((c) => c.by === me.id && c.status !== 'removed').map((c) => meta(c, me)), equip: Object.fromEntries(CM.SLOTS.map((k) => [k, eq[k] || null])) };
+  const own = (c) => (owns(me, c.id) || c.by === me.id) && c.status !== 'removed' || owns(me, c.id), up = (c) => c.by === me.id && c.status !== 'removed';
+  const d3 = all.filter((c) => c.slot !== FOOT), ft = all.filter((c) => c.slot === FOOT);
+  return { owned: d3.filter(own).map((c) => meta(c, me)), uploads: d3.filter(up).map((c) => meta(c, me)), equip: Object.fromEntries(CM.SLOTS.map((k) => [k, eq[k] || null])),
+    foot: { owned: ft.filter(own).map((c) => meta(c, me)), uploads: ft.filter(up).map((c) => meta(c, me)), equip: eq[FOOT] || null } };
 }
 // Mô hình đầy đủ (nặng): chỉ người tác giả / chủ sở hữu / nhân viên / bất kỳ ai khi đã lên chợ
 function item(db, me, id, staff) {
@@ -71,7 +87,7 @@ function buy(db, me, id, now) {
   const bonus = p === 0 ? Eco.creatorBonus(db, c, now) : 0; return { ok: true, cut, price: p, bonus };
 }
 function equip(db, me, slot, id) {
-  if (!CM.SLOTS.includes(slot)) return { error: 'cm_slot' };
+  if (!ALL.includes(slot)) return { error: 'cm_slot' };
   const eq = (me.kequip ||= {}); if (!id) { delete eq[slot]; return { ok: true }; }
   const c = db.cosm[id]; if (!c || c.slot !== slot || !(owns(me, id) || c.by === me.id) || c.status === 'removed' && !owns(me, id)) return { error: 'cm_notyours' };
   if (c.status === 'pending' && c.by !== me.id) return { error: 'cm_notyours' };
@@ -95,7 +111,7 @@ const queue = (db) => Object.values(db.cosm).filter((c) => c.status === 'pending
 // Cosmetic người khác thấy (gắn vào thẻ bạn bè): chỉ id của món đang đeo và còn hợp lệ
 function worn(db, u) {
   const eq = u.kequip; if (!eq) return null; const o = {};
-  for (const s of CM.SLOTS) { const c = eq[s] && db.cosm[eq[s]]; if (c && c.slot === s && (c.status === 'live' || owns(u, c.id) || c.by === u.id) && c.status !== 'rejected') o[s] = c.id; }
+  for (const s of ALL) { const c = eq[s] && db.cosm[eq[s]]; if (c && c.slot === s && (c.status === 'live' || owns(u, c.id) || c.by === u.id) && c.status !== 'rejected') o[s] = c.id; }
   return Object.keys(o).length ? o : null;
 }
-module.exports = { MIN_PRICE, MAX_PRICE, CUT, FEE, upload, list, mine, item, buy, equip, remove, review, queue, worn, meta };
+module.exports = { cleanFp, MIN_PRICE, MAX_PRICE, CUT, FEE, upload, list, mine, item, buy, equip, remove, review, queue, worn, meta };

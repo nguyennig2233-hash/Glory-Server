@@ -49,3 +49,8 @@ Chỉ cần tải lại shop.js lên GitHub Glory-Server (các file khác không
 - Người thuê title có thể chọn: màu tùy ý (#rrggbb), gradient 2–3 màu + góc, cầu vồng, glow/neon, hiệu ứng (ánh lướt, màu chảy, nhịp đập, chớp), khung, kiểu chữ, đậm/nghiêng, icon (12 icon vẽ), ảnh PNG nhỏ (≤64x64, ≤12KB).
 - Server tự làm sạch mọi giá trị (chỉ nhận trong danh sách cho phép, ảnh phải là PNG thật); dữ liệu lưu ở me.ctitle.fx / me.ctitle.img.
 - Gỡ title vi phạm vẫn dùng dev op "ctitle" (xóa cả kiểu và ảnh).
+
+--- Footprint (cosmetics.js) ---
+- Loại cosmetic mới slot "foot" (hiệu ứng dấu chân): ảnh PNG ≤ 32x32 + thông số fp (size, gap, life, op, fade, alt, tint, glow, burst, when), server tự làm sạch.
+- Dùng chung chợ / mua / duyệt / đeo / hoàn phí / chia 70-30 với cosmetic 3D. Chỉ sửa cosmetics.js (glory-server.js không đổi).
+- Chợ 3D (/api/cosm không có slot) không còn hiện dấu chân; xem bằng /api/cosm?slot=foot. /api/cosm/mine trả thêm trường "foot": { owned, uploads, equip }.
