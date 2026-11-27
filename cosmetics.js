@@ -12,19 +12,38 @@ const NAME_RE = /^[\p{L}\p{N} _'’\-.!]{2,30}$/u;
 // Hiệu ứng dấu chân (slot 'foot'): không có mô hình 3D, chỉ có ảnh dấu (PNG ≤ 32x32) + thông số `fp`. Dùng chung chợ / mua / duyệt / đeo với cosmetic 3D.
 const FOOT = 'foot', ALL = [...CM.SLOTS, FOOT];
 const BURSTS = ['none', 'spark', 'smoke', 'flame', 'heart', 'snow', 'bubble', 'note'], FADES = ['none', 'out', 'shrink'], WHENS = ['walk', 'sprint', 'all'], STAMP_MAX = 32;
+const LAYER_MAX = 5, LAYER_IMG_MAX = 24000, BLENDS = ['normal', 'add'], MODES = ['flat', 'billboard', 'spin', 'cross'];
 function cleanFp(x) {
   x = x && typeof x === 'object' ? x : {};
   const num = (v, lo, hi, d) => { v = Number(v); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v * 100) / 100)) : d; };
   const pick = (v, list, d) => (list.includes(v) ? v : d);
-  return { size: num(x.size, 0.5, 2, 1), gap: num(x.gap, 0.4, 1.6, 0.8), life: num(x.life, 1, 10, 4), op: num(x.op, 0.3, 1, 0.9), fade: pick(x.fade, FADES, 'out'),
-    alt: x.alt !== false, tint: typeof x.tint === 'string' && /^#[0-9a-fA-F]{6}$/.test(x.tint) ? x.tint.toLowerCase() : '', glow: Math.round(num(x.glow, 0, 3, 0)),
-    burst: pick(x.burst, BURSTS, 'none'), when: pick(x.when, WHENS, 'walk') };
+  const hex = (v) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : '');
+  const out = { size: num(x.size, 0.5, 2, 1), gap: num(x.gap, 0.4, 1.6, 0.8), life: num(x.life, 1, 10, 4), op: num(x.op, 0.3, 1, 0.9), fade: pick(x.fade, FADES, 'out'),
+    alt: x.alt !== false, tint: hex(x.tint), glow: Math.round(num(x.glow, 0, 3, 0)), burst: pick(x.burst, BURSTS, 'none'), when: pick(x.when, WHENS, 'walk') };
+  // Lớp VFX xếp chồng (tối đa 5): mỗi lớp là một ảnh PNG nhỏ + thông số chuyển động; server chỉ nhận số trong giới hạn và PNG hợp lệ ≤ 32x32.
+  if (Array.isArray(x.layers) && x.layers.length) {
+    if (x.layers.length > LAYER_MAX) return { error: 'cm_fp_layers' };
+    out.layers = [];
+    for (const l of x.layers) {
+      if (!l || typeof l !== 'object') return { error: 'cm_fp_layers' };
+      const t = CM.cleanTex(l.img); if (t.error) return t;
+      const fr = Math.round(num(l.frames, 1, 8, 1));   // ảnh dạng dải ngang: fr khung, mỗi khung <= 32x32
+      if (t.h > STAMP_MAX || t.w > STAMP_MAX * fr || t.w % fr) return { error: 'cm_fp_dim' };
+      if (t.tex.length > LAYER_IMG_MAX) return { error: 'cm_tex_big' };
+      out.layers.push({ img: t.tex, tint: hex(l.tint), tint2: hex(l.tint2), size0: num(l.size0, 0.1, 3, 1), size1: num(l.size1, 0.1, 3, 1), ox: num(l.ox, -1, 1, 0), oy: num(l.oy, -1, 1, 0),
+        rot: num(l.rot, -180, 180, 0), spin: num(l.spin, -720, 720, 0), op0: num(l.op0, 0, 1, 1), op1: num(l.op1, 0, 1, 0), blend: pick(l.blend, BLENDS, 'normal'),
+        frames: fr, fps: num(l.fps, 1, 30, 8), loop: l.loop !== false, mode: pick(l.mode, MODES, 'flat'), h0: num(l.h0, -0.5, 3, 0), h1: num(l.h1, -0.5, 3, 0), pulse: num(l.pulse, 0, 0.5, 0), flick: num(l.flick, 0, 1, 0), delay: num(l.delay, 0, 3, 0), mirror: l.mirror !== false, name: String(l.name || '').slice(0, 20).replace(/[^\p{L}\p{N} ._'\-]/gu, '') });
+    }
+  }
+  return out;
 }
+// Danh sách / thẻ chợ chỉ cần thông số nhẹ: bỏ ảnh của từng lớp (ảnh chỉ trả về khi xem chi tiết một món).
+const fpLite = (f) => (f && f.layers ? { ...f, layers: f.layers.map(({ img, ...r }) => r) } : f || null);
 const live = (c) => c && c.status === 'live';
 const owns = (u, id) => Array.isArray(u.kown) && u.kown.includes(id);
 const priceOf = (c) => (c.cur === 'shard' ? Math.max(0, c.price | 0) : 0);
 const meta = (c, me) => ({ id: c.id, name: c.name, desc: c.desc || '', slot: c.slot, price: priceOf(c), free: priceOf(c) === 0, by: c.byName, byId: c.by, at: c.at, sales: c.sales || 0, status: c.status, why: c.why || '',
-  owned: !!me && (owns(me, c.id) || c.by === me.id), mine: !!me && c.by === me.id, els: c.model.els.length, fp: c.fp || null });
+  owned: !!me && (owns(me, c.id) || c.by === me.id), mine: !!me && c.by === me.id, els: c.model.els.length, fp: fpLite(c.fp) });
 
 function upload(db, me, body, now) {
   const mine = Object.values(db.cosm).filter((c) => c.by === me.id && c.status !== 'removed');
@@ -38,7 +57,7 @@ function upload(db, me, body, now) {
   let price = 0;
   if (paid) { price = Math.floor(+body.price); if (!(price >= MIN_PRICE)) return { error: 'cm_price_min' }; if (price > MAX_PRICE) return { error: 'cm_price_max' }; }
   let m, t, fp = null;
-  if (slot === FOOT) { t = CM.cleanTex(body.tex); if (t.error) return t; if (t.w > STAMP_MAX || t.h > STAMP_MAX) return { error: 'cm_fp_dim' }; fp = cleanFp(body.fp); m = { model: { els: [] } }; }
+  if (slot === FOOT) { t = CM.cleanTex(body.tex); if (t.error) return t; if (t.w > STAMP_MAX || t.h > STAMP_MAX) return { error: 'cm_fp_dim' }; fp = cleanFp(body.fp); if (fp.error) return fp; m = { model: { els: [] } }; }
   else { m = CM.clean(body.model); if (m.error) return m; t = CM.cleanTex(body.tex); if (t.error) return t; }
   const dup = Object.values(db.cosm).find((c) => c.by === me.id && c.status !== 'removed' && c.name.toLowerCase() === name.toLowerCase()); if (dup) return { error: 'cm_dupname' };
   if (paid && Shards.ledger(me).bal < FEE) return { error: 'cm_nofee' };
@@ -73,7 +92,7 @@ function mine(db, me) {
 function item(db, me, id, staff) {
   const c = db.cosm[id]; if (!c) return null;
   if (!live(c) && !(me && (c.by === me.id || owns(me, c.id) || staff))) return null;
-  return { ...meta(c, me), model: c.model, tex: c.tex };
+  return { ...meta(c, me), model: c.model, tex: c.tex, fp: c.fp || null };
 }
 function buy(db, me, id, now) {
   const c = db.cosm[id]; if (!live(c)) return { error: 'cm_gone' };

@@ -54,3 +54,10 @@ Chỉ cần tải lại shop.js lên GitHub Glory-Server (các file khác không
 - Loại cosmetic mới slot "foot" (hiệu ứng dấu chân): ảnh PNG ≤ 32x32 + thông số fp (size, gap, life, op, fade, alt, tint, glow, burst, when), server tự làm sạch.
 - Dùng chung chợ / mua / duyệt / đeo / hoàn phí / chia 70-30 với cosmetic 3D. Chỉ sửa cosmetics.js (glory-server.js không đổi).
 - Chợ 3D (/api/cosm không có slot) không còn hiện dấu chân; xem bằng /api/cosm?slot=foot. /api/cosm/mine trả thêm trường "foot": { owned, uploads, equip }.
+
+== Footprint nhiều lớp VFX ==
+Chỉ cần thay cosmetics.js (kèm các file server cũ trong zip). Mỗi footprint có tối đa 5 lớp, ảnh mỗi lớp <= 32x32.
+Danh sách chợ trả bản nhẹ (không có ảnh lớp), mở chi tiết một món mới trả đủ ảnh. Footprint kiểu cũ (1 ảnh) vẫn chạy bình thường.
+
+== Footprint: hoạt ảnh + 3D ==
+cosmetics.js (thay file cũ): mỗi lớp thêm frames (1-8, ảnh là dải ngang tối đa 256x32), fps, loop, mode (flat|billboard|spin|cross), h0/h1 (độ cao).
