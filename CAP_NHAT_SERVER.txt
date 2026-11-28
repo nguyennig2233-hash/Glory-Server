@@ -61,3 +61,10 @@ Danh sách chợ trả bản nhẹ (không có ảnh lớp), mở chi tiết m�
 
 == Footprint: hoạt ảnh + 3D ==
 cosmetics.js (thay file cũ): mỗi lớp thêm frames (1-8, ảnh là dải ngang tối đa 256x32), fps, loop, mode (flat|billboard|spin|cross), h0/h1 (độ cao).
+
+== Footprint: keyframe + khung hình + máy phát hạt ==
+cosmetics.js (thay file cũ, không cần sửa file nào khác): mỗi lớp thêm
+- frames tăng lên tối đa 16 (ảnh dải ngang tối đa 512x32); seq = thứ tự phát khung (tối đa 48 phần tử).
+- keys = tối đa 8 keyframe {t 0..1, size, op, rot, ox, oy, h, col, ease lin|in|out|io}.
+- type = "sprite" | "emit"; lớp emit có em = {rate, life, speed, spread, dir, up, grav, rad, s0, s1, o0, o1, spin, max<=24, c0, c1}.
+Mọi số bị kẹp trong giới hạn, màu phải là #rrggbb, ảnh mỗi lớp <= 40000 ký tự base64. Footprint cũ vẫn chạy bình thường.

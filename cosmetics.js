@@ -12,7 +12,30 @@ const NAME_RE = /^[\p{L}\p{N} _'’\-.!]{2,30}$/u;
 // Hiệu ứng dấu chân (slot 'foot'): không có mô hình 3D, chỉ có ảnh dấu (PNG ≤ 32x32) + thông số `fp`. Dùng chung chợ / mua / duyệt / đeo với cosmetic 3D.
 const FOOT = 'foot', ALL = [...CM.SLOTS, FOOT];
 const BURSTS = ['none', 'spark', 'smoke', 'flame', 'heart', 'snow', 'bubble', 'note'], FADES = ['none', 'out', 'shrink'], WHENS = ['walk', 'sprint', 'all'], STAMP_MAX = 32;
-const LAYER_MAX = 5, LAYER_IMG_MAX = 24000, BLENDS = ['normal', 'add'], MODES = ['flat', 'billboard', 'spin', 'cross'];
+const LAYER_MAX = 5, LAYER_IMG_MAX = 40000, FRAME_MAX = 16, KEY_MAX = 8, SEQ_MAX = 48, EASES = ['lin', 'in', 'out', 'io'], BLENDS = ['normal', 'add'], MODES = ['flat', 'billboard', 'spin', 'cross'];
+// Khung khóa (keyframe) của một lớp: tối đa 8 khóa, thời gian 0..1 (tỉ lệ đời sống của dấu chân), mọi số bị kẹp trong giới hạn.
+function cleanKeys(ks) {
+  if (!Array.isArray(ks) || ks.length < 2) return undefined;
+  const num = (v, lo, hi, d) => { v = Number(v); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v * 100) / 100)) : d; };
+  const hex = (v) => (typeof v === 'string' && /^#[0-9a-fA-F]{6}$/.test(v) ? v.toLowerCase() : '');
+  const out = ks.slice(0, KEY_MAX).map((k) => ({ t: num(k && k.t, 0, 1, 0), size: num(k && k.size, 0.05, 3, 1), op: num(k && k.op, 0, 1, 1), rot: num(k && k.rot, -720, 720, 0),
+    ox: num(k && k.ox, -1.5, 1.5, 0), oy: num(k && k.oy, -1.5, 1.5, 0), h: num(k && k.h, -0.5, 3, 0), col: hex(k && k.col), ease: EASES.includes(k && k.ease) ? k.ease : 'lin' }));
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+// Thứ tự hiển thị khung hình (cho phép lặp để kéo dài một khung): chỉ số 0..frames-1, tối đa 48 phần tử.
+function cleanSeq(sq, fr) {
+  if (!Array.isArray(sq) || !sq.length) return undefined;
+  const out = sq.slice(0, SEQ_MAX).map((v) => Math.max(0, Math.min(fr - 1, Math.round(Number(v)) || 0)));
+  return out;
+}
+// Máy phát hạt kiểu Geometry Dash: hạt sinh ra theo thời gian, mỗi hạt có vận tốc, trọng lực, đổi cỡ / độ sáng / màu theo đời sống. Vị trí tính từ công thức nên không cần lưu trạng thái.
+function cleanEm(e, hex) {
+  e = e && typeof e === 'object' ? e : {};
+  const num = (v, lo, hi, d) => { v = Number(v); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v * 100) / 100)) : d; };
+  return { rate: num(e.rate, 1, 40, 10), life: num(e.life, 0.2, 3, 1), speed: num(e.speed, 0, 4, 0.6), spread: num(e.spread, 0, 360, 360), dir: num(e.dir, -180, 180, 0), up: num(e.up, -2, 4, 0.8), grav: num(e.grav, -4, 4, 1.5),
+    rad: num(e.rad, 0, 1, 0.2), s0: num(e.s0, 0.02, 1.5, 0.3), s1: num(e.s1, 0.02, 1.5, 0.05), o0: num(e.o0, 0, 1, 1), o1: num(e.o1, 0, 1, 0), c0: hex(e.c0), c1: hex(e.c1), spin: num(e.spin, -720, 720, 0), max: Math.round(num(e.max, 1, 24, 16)) };
+}
 function cleanFp(x) {
   x = x && typeof x === 'object' ? x : {};
   const num = (v, lo, hi, d) => { v = Number(v); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.round(v * 100) / 100)) : d; };
@@ -27,12 +50,12 @@ function cleanFp(x) {
     for (const l of x.layers) {
       if (!l || typeof l !== 'object') return { error: 'cm_fp_layers' };
       const t = CM.cleanTex(l.img); if (t.error) return t;
-      const fr = Math.round(num(l.frames, 1, 8, 1));   // ảnh dạng dải ngang: fr khung, mỗi khung <= 32x32
+      const fr = Math.round(num(l.frames, 1, FRAME_MAX, 1));   // ảnh dạng dải ngang: fr khung, mỗi khung <= 32x32
       if (t.h > STAMP_MAX || t.w > STAMP_MAX * fr || t.w % fr) return { error: 'cm_fp_dim' };
       if (t.tex.length > LAYER_IMG_MAX) return { error: 'cm_tex_big' };
       out.layers.push({ img: t.tex, tint: hex(l.tint), tint2: hex(l.tint2), size0: num(l.size0, 0.1, 3, 1), size1: num(l.size1, 0.1, 3, 1), ox: num(l.ox, -1, 1, 0), oy: num(l.oy, -1, 1, 0),
         rot: num(l.rot, -180, 180, 0), spin: num(l.spin, -720, 720, 0), op0: num(l.op0, 0, 1, 1), op1: num(l.op1, 0, 1, 0), blend: pick(l.blend, BLENDS, 'normal'),
-        frames: fr, fps: num(l.fps, 1, 30, 8), loop: l.loop !== false, mode: pick(l.mode, MODES, 'flat'), h0: num(l.h0, -0.5, 3, 0), h1: num(l.h1, -0.5, 3, 0), pulse: num(l.pulse, 0, 0.5, 0), flick: num(l.flick, 0, 1, 0), delay: num(l.delay, 0, 3, 0), mirror: l.mirror !== false, name: String(l.name || '').slice(0, 20).replace(/[^\p{L}\p{N} ._'\-]/gu, '') });
+        frames: fr, fps: num(l.fps, 1, 30, 8), loop: l.loop !== false, mode: pick(l.mode, MODES, 'flat'), h0: num(l.h0, -0.5, 3, 0), h1: num(l.h1, -0.5, 3, 0), type: l.type === 'emit' ? 'emit' : 'sprite', keys: cleanKeys(l.keys), seq: cleanSeq(l.seq, fr), em: l.type === 'emit' ? cleanEm(l.em, hex) : undefined, pulse: num(l.pulse, 0, 0.5, 0), flick: num(l.flick, 0, 1, 0), delay: num(l.delay, 0, 3, 0), mirror: l.mirror !== false, name: String(l.name || '').slice(0, 20).replace(/[^\p{L}\p{N} ._'\-]/gu, '') });
     }
   }
   return out;
